@@ -7,7 +7,7 @@ const RATE_LIMIT_WINDOW = 60; // seconds
 const ipRequests = new Map<string, { count: number; resetTime: number }>();
 
 export function rateLimit(request: NextRequest) {
-  const ip = request.ip ?? 'anonymous';
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] ?? request.headers.get('x-real-ip') ?? 'anonymous';
   const now = Date.now();
   const windowStart = now - RATE_LIMIT_WINDOW * 1000;
 
@@ -45,4 +45,4 @@ export function rateLimit(request: NextRequest) {
   }
 
   return null;
-} 
+}
