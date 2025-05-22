@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "lint:version": "eslint -v",
+    "lint:config": "eslint --print-config ./app/contact/page.tsx"
   },
   "dependencies": {
     "@clerk/nextjs": "^6.19.5",
