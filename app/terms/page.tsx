@@ -42,9 +42,10 @@ export default function TermsPage() {
           <h2 className="text-2xl font-semibold mb-4">2. Service Description</h2>
           <p className="text-muted-foreground mb-4">
             PDF Merger provides a web-based service for merging PDF documents. The service is
-            provided "as is" and we make no warranties, expressed or implied, regarding the
+            provided &quot;as is&quot; and we make no warranties, expressed or implied, regarding the
             operation of the service or the information, content, or materials included.
           </p>
+
         </motion.section>
 
         <motion.section

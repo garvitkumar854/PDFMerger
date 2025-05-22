@@ -66,8 +66,9 @@ export default function ContactPage() {
       >
         <h1 className="text-4xl font-bold mb-4">Contact Us</h1>
         <p className="text-muted-foreground text-lg">
-          Have questions? We'd love to hear from you.
+          Have questions? We&rsquo;d love to hear from you.
         </p>
+
       </motion.div>
 
       <div className="grid grid-cols-1 gap-8">
