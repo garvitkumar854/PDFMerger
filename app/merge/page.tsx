@@ -116,13 +116,20 @@ export default function MergePDF() {
       setIsComplete(false);
       setMergedPdfUrl(null);
 
-      // Start progress animation
+      // Calculate total size
+      const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+      const isSmallMerge = totalSize <= 2 * 1024 * 1024; // 2MB total threshold
+
+      // Faster progress for small files
       const progressInterval = setInterval(() => {
         setMergeProgress(prev => {
-          const increment = prev < 30 ? 0.5 : prev < 60 ? 0.3 : 0.1;
-          return Math.min(prev + increment, 85);
+          // Much faster progress for small files
+          const increment = isSmallMerge
+            ? prev < 50 ? 2 : prev < 80 ? 1 : 0.5
+            : prev < 30 ? 0.5 : prev < 60 ? 0.3 : 0.1;
+          return Math.min(prev + increment, isSmallMerge ? 90 : 85);
         });
-      }, 300);
+      }, isSmallMerge ? 100 : 300);
 
       const formData = new FormData();
       files.forEach(fileItem => {
@@ -134,7 +141,7 @@ export default function MergePDF() {
       });
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes timeout
+      const timeoutId = setTimeout(() => controller.abort(), 180000);
 
       try {
         const response = await fetch("/api/merge", {
@@ -151,7 +158,6 @@ export default function MergePDF() {
           throw new Error(errorData.error || "Failed to merge PDFs");
         }
 
-        // Handle the PDF response
         const blob = await response.blob();
         
         if (blob.size === 0) {
@@ -162,8 +168,8 @@ export default function MergePDF() {
         setMergedPdfUrl(url);
         setMergeProgress(100);
         
-        // Small delay before showing complete state
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Shorter delay for small files
+        await new Promise(resolve => setTimeout(resolve, isSmallMerge ? 200 : 500));
         setIsComplete(true);
 
         toast({

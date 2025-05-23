@@ -12,6 +12,7 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 const CHUNK_SIZE = 5; // Process 5 pages at a time for better stability
 const CONCURRENT_FILES = 3; // Number of files to process concurrently
+const SMALL_FILE_THRESHOLD = 1024 * 1024; // 1MB threshold for small files
 
 // Simple in-memory cache
 const pdfCache = new Map<string, { data: Uint8Array; timestamp: number }>();
@@ -26,32 +27,30 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-async function processPDFChunks(pdfDoc: PDFDocument, mergedPdf: PDFDocument): Promise<void> {
+// Fast merge for small PDFs
+async function fastMergePDFs(pdfDoc: PDFDocument, mergedPdf: PDFDocument): Promise<void> {
+  const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+  pages.forEach(page => mergedPdf.addPage(page));
+}
+
+// Chunked merge for larger PDFs
+async function chunkedMergePDFs(pdfDoc: PDFDocument, mergedPdf: PDFDocument): Promise<void> {
   const pageCount = pdfDoc.getPageCount();
-  const chunks = Math.ceil(pageCount / CHUNK_SIZE);
+  const chunkSize = 10; // Increased chunk size for better performance
+  const chunks = Math.ceil(pageCount / chunkSize);
 
   for (let i = 0; i < chunks; i++) {
-    const start = i * CHUNK_SIZE;
-    const end = Math.min((i + 1) * CHUNK_SIZE, pageCount);
+    const start = i * chunkSize;
+    const end = Math.min((i + 1) * chunkSize, pageCount);
     const pageIndices = Array.from({ length: end - start }, (_, idx) => start + idx);
 
-    try {
-      const pages = await mergedPdf.copyPages(pdfDoc, pageIndices);
-      pages.forEach(page => {
-        try {
-          mergedPdf.addPage(page);
-        } catch (error) {
-          console.error('Error adding page:', error);
-          throw error;
-        }
-      });
-    } catch (error) {
-      console.error(`Error copying pages ${start} to ${end}:`, error);
-      throw error;
-    }
+    const pages = await mergedPdf.copyPages(pdfDoc, pageIndices);
+    pages.forEach(page => mergedPdf.addPage(page));
 
-    // Small delay to prevent blocking
-    await new Promise(resolve => setTimeout(resolve, 5));
+    // Minimal delay only for large files
+    if (pageCount > 50) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
   }
 }
 
@@ -71,7 +70,7 @@ async function processFileConcurrently(
     throw new Error(`${file.name} appears to be empty or corrupted`);
   }
 
-  await processPDFChunks(pdfDoc, mergedPdf);
+  await chunkedMergePDFs(pdfDoc, mergedPdf);
   // Clean up memory
   fileBuffer.slice(0);
 }
@@ -122,8 +121,10 @@ export async function POST(request: Request) {
       throw new Error("At least two PDF files are required");
     }
 
-    // Validate files
+    // Calculate total size and check if we can use fast merge
     let totalSize = 0;
+    let canUseFastMerge = true;
+    
     for (const file of files) {
       if (!file.type || file.type !== "application/pdf") {
         throw new Error(`File ${file.name} is not a valid PDF`);
@@ -132,7 +133,11 @@ export async function POST(request: Request) {
       if (file.size > MAX_FILE_SIZE) {
         throw new Error(`File ${file.name} exceeds maximum size of 50MB`);
       }
+      
       totalSize += file.size;
+      if (file.size > SMALL_FILE_THRESHOLD) {
+        canUseFastMerge = false;
+      }
     }
 
     if (totalSize > MAX_TOTAL_SIZE) {
@@ -177,7 +182,12 @@ export async function POST(request: Request) {
           throw new Error(`${file.name} appears to be empty`);
         }
 
-        await processPDFChunks(pdfDoc, mergedPdf);
+        // Use appropriate merge method based on file size
+        if (canUseFastMerge) {
+          await fastMergePDFs(pdfDoc, mergedPdf);
+        } else {
+          await chunkedMergePDFs(pdfDoc, mergedPdf);
+        }
         
         // Clear buffer
         fileBuffer.slice(0);
@@ -198,7 +208,7 @@ export async function POST(request: Request) {
     const mergedPdfBytes = await mergedPdf.save({
       useObjectStreams: true,
       addDefaultPage: false,
-      objectsPerTick: 20
+      objectsPerTick: canUseFastMerge ? 100 : 40 // Higher value for small files
     });
 
     if (!mergedPdfBytes || mergedPdfBytes.length === 0) {
