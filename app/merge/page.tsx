@@ -110,29 +110,46 @@ export default function MergePDF() {
       return;
     }
 
+    let progressInterval: NodeJS.Timeout;
+
     try {
       setIsMerging(true);
       setMergeProgress(0);
       setIsComplete(false);
       setMergedPdfUrl(null);
 
-      // Calculate total size
+      // Calculate total size and determine processing tier
       const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-      const isSmallMerge = totalSize <= 2 * 1024 * 1024; // 2MB total threshold
+      const tier = {
+        tiny: totalSize <= 512 * 1024,        // 512KB
+        small: totalSize <= 2 * 1024 * 1024,  // 2MB
+        medium: totalSize <= 10 * 1024 * 1024, // 10MB
+        large: true                           // > 10MB
+      };
 
-      // Faster progress for small files
-      const progressInterval = setInterval(() => {
+      // Adaptive progress configuration
+      const progressConfig = {
+        interval: tier.tiny ? 50 : tier.small ? 100 : tier.medium ? 200 : 300,
+        maxProgress: tier.tiny ? 95 : tier.small ? 92 : tier.medium ? 88 : 85,
+        increments: {
+          initial: tier.tiny ? 5 : tier.small ? 2 : tier.medium ? 1 : 0.5,
+          middle: tier.tiny ? 2 : tier.small ? 1 : tier.medium ? 0.5 : 0.3,
+          final: tier.tiny ? 1 : tier.small ? 0.5 : tier.medium ? 0.3 : 0.1
+        }
+      };
+
+      // Adaptive progress tracking
+      progressInterval = setInterval(() => {
         setMergeProgress(prev => {
-          // Much faster progress for small files
-          const increment = isSmallMerge
-            ? prev < 50 ? 2 : prev < 80 ? 1 : 0.5
-            : prev < 30 ? 0.5 : prev < 60 ? 0.3 : 0.1;
-          return Math.min(prev + increment, isSmallMerge ? 90 : 85);
+          const increment = prev < 30 ? progressConfig.increments.initial :
+                          prev < 60 ? progressConfig.increments.middle :
+                          progressConfig.increments.final;
+          return Math.min(prev + increment, progressConfig.maxProgress);
         });
-      }, isSmallMerge ? 100 : 300);
+      }, progressConfig.interval);
 
       const formData = new FormData();
-      files.forEach(fileItem => {
+      files.forEach((fileItem: FileItem) => {
         if (!fileItem.content) {
           throw new Error(`Content not found for file ${fileItem.name}`);
         }
@@ -168,18 +185,19 @@ export default function MergePDF() {
         setMergedPdfUrl(url);
         setMergeProgress(100);
         
-        // Shorter delay for small files
-        await new Promise(resolve => setTimeout(resolve, isSmallMerge ? 200 : 500));
+        // Adaptive completion delay
+        await new Promise(resolve => setTimeout(resolve, tier.tiny ? 100 : tier.small ? 200 : 500));
         setIsComplete(true);
 
         toast({
           title: "Success!",
-          description: "PDFs merged successfully",
+          description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
+          variant: "default"
         });
 
       } catch (error) {
         clearTimeout(timeoutId);
-        clearInterval(progressInterval);
+        if (progressInterval) clearInterval(progressInterval);
         throw error;
       }
 
