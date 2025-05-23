@@ -130,39 +130,58 @@ export default function MergePDF() {
       });
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      // Increase timeout to 60 seconds for larger files
+      const timeoutId = setTimeout(() => {
+        controller.abort("Operation timed out after 60 seconds");
+      }, 60000);
 
-      const response = await fetch("/api/merge", {
-        method: "POST",
-        body: formData,
-        signal: controller.signal,
-      });
+      try {
+        const response = await fetch("/api/merge", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
 
-      clearTimeout(timeoutId);
-      clearInterval(progressInterval);
+        clearTimeout(timeoutId);
+        clearInterval(progressInterval);
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to merge PDFs");
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || "Failed to merge PDFs");
+        }
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        setMergedPdfUrl(url);
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setMergeProgress(100);
+        setIsComplete(true);
+
+        toast({
+          title: "Success!",
+          description: "PDFs merged successfully",
+        });
+      } catch (error) {
+        clearTimeout(timeoutId);
+        clearInterval(progressInterval);
+        throw error;
       }
-
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      setMergedPdfUrl(url);
-      
-      await new Promise(resolve => setTimeout(resolve, 500));
-      setMergeProgress(100);
-      setIsComplete(true);
-
-      toast({
-        title: "Success!",
-        description: "PDFs merged successfully",
-      });
     } catch (error) {
       console.error("Error merging PDFs:", error);
+      let errorMessage = "Failed to merge PDFs. Please try again.";
+      
+      if (error instanceof Error) {
+        if (error.name === "AbortError") {
+          errorMessage = "The operation took too long. Try with fewer or smaller files.";
+        } else {
+          errorMessage = error.message;
+        }
+      }
+
       toast({
         title: "Error",
-        description: error instanceof Error ? error.message : "Failed to merge PDFs. Please try again.",
+        description: errorMessage,
         variant: "destructive",
       });
     } finally {
