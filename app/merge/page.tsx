@@ -119,11 +119,11 @@ export default function MergePDF() {
       // Start progress animation
       const progressInterval = setInterval(() => {
         setMergeProgress(prev => {
-          // Slow down progress as it gets higher
-          const increment = prev < 50 ? 2 : prev < 80 ? 1 : 0.5;
-          return Math.min(prev + increment, 95);
+          // Slower progress increment for larger files
+          const increment = prev < 30 ? 1 : prev < 60 ? 0.5 : 0.2;
+          return Math.min(prev + increment, 90);
         });
-      }, 100);
+      }, 200);
 
       const formData = new FormData();
       let totalSize = 0;
@@ -152,9 +152,10 @@ export default function MergePDF() {
       });
 
       const controller = new AbortController();
+      // Increase timeout to 180 seconds for larger files
       const timeoutId = setTimeout(() => {
-        controller.abort("Operation timed out after 60 seconds");
-      }, 60000);
+        controller.abort("Operation timed out after 180 seconds");
+      }, 180000);
 
       try {
         const response = await fetch("/api/merge", {
@@ -176,7 +177,39 @@ export default function MergePDF() {
         }
 
         console.log('PDF merge response received');
-        const blob = await response.blob();
+        
+        // Start blob reading with progress
+        const reader = response.body?.getReader();
+        const contentLength = parseInt(response.headers.get('Content-Length') || '0');
+        let receivedLength = 0;
+        const chunks = [];
+
+        while(true && reader) {
+          const {done, value} = await reader.read();
+          
+          if (done) {
+            break;
+          }
+          
+          chunks.push(value);
+          receivedLength += value.length;
+          
+          // Update progress based on download progress
+          if (contentLength) {
+            const downloadProgress = (receivedLength / contentLength) * 100;
+            setMergeProgress(90 + (downloadProgress * 0.1)); // Last 10% is download progress
+          }
+        }
+
+        // Combine all chunks into a single Uint8Array
+        const chunksAll = new Uint8Array(receivedLength);
+        let position = 0;
+        for(const chunk of chunks) {
+          chunksAll.set(chunk, position);
+          position += chunk.length;
+        }
+        
+        const blob = new Blob([chunksAll], { type: 'application/pdf' });
         
         if (blob.size === 0) {
           console.error('Generated PDF is empty');
@@ -199,6 +232,7 @@ export default function MergePDF() {
         });
       } catch (error) {
         clearTimeout(timeoutId);
+        clearInterval(progressInterval);
         throw error;
       }
     } catch (error) {
@@ -207,7 +241,7 @@ export default function MergePDF() {
       
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "The operation took too long. Try with fewer or smaller files.";
+          errorMessage = "The operation took too long. Try with fewer or smaller files, or try again.";
         } else if (error.message.includes("maximum size") || error.message.includes("size exceeds")) {
           errorMessage = error.message;
         } else if (error.message.includes("empty")) {
