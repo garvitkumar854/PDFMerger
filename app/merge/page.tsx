@@ -119,43 +119,22 @@ export default function MergePDF() {
       // Start progress animation
       const progressInterval = setInterval(() => {
         setMergeProgress(prev => {
-          // Slower progress increment for larger files
-          const increment = prev < 30 ? 1 : prev < 60 ? 0.5 : 0.2;
-          return Math.min(prev + increment, 90);
+          const increment = prev < 30 ? 0.5 : prev < 60 ? 0.3 : 0.1;
+          return Math.min(prev + increment, 85);
         });
-      }, 200);
+      }, 300);
 
       const formData = new FormData();
-      let totalSize = 0;
-
-      // Validate files before sending
-      for (const fileItem of files) {
+      files.forEach(fileItem => {
         if (!fileItem.content) {
           throw new Error(`Content not found for file ${fileItem.name}`);
         }
         const file = new File([fileItem.content], fileItem.name, { type: fileItem.type });
-        totalSize += file.size;
-        
-        if (file.size > 50 * 1024 * 1024) {
-          throw new Error(`File ${file.name} exceeds maximum size of 50MB`);
-        }
         formData.append("files", file);
-      }
-
-      if (totalSize > 100 * 1024 * 1024) {
-        throw new Error("Total file size exceeds 100MB limit");
-      }
-
-      console.log('Starting PDF merge request...', {
-        fileCount: files.length,
-        totalSize: totalSize / (1024 * 1024) + 'MB'
       });
 
       const controller = new AbortController();
-      // Increase timeout to 180 seconds for larger files
-      const timeoutId = setTimeout(() => {
-        controller.abort("Operation timed out after 180 seconds");
-      }, 180000);
+      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes timeout
 
       try {
         const response = await fetch("/api/merge", {
@@ -165,64 +144,25 @@ export default function MergePDF() {
         });
 
         clearTimeout(timeoutId);
+        clearInterval(progressInterval);
 
         if (!response.ok) {
           const errorData = await response.json();
-          console.error('Server response error:', {
-            status: response.status,
-            statusText: response.statusText,
-            error: errorData
-          });
           throw new Error(errorData.error || "Failed to merge PDFs");
         }
 
-        console.log('PDF merge response received');
-        
-        // Start blob reading with progress
-        const reader = response.body?.getReader();
-        const contentLength = parseInt(response.headers.get('Content-Length') || '0');
-        let receivedLength = 0;
-        const chunks = [];
-
-        while(true && reader) {
-          const {done, value} = await reader.read();
-          
-          if (done) {
-            break;
-          }
-          
-          chunks.push(value);
-          receivedLength += value.length;
-          
-          // Update progress based on download progress
-          if (contentLength) {
-            const downloadProgress = (receivedLength / contentLength) * 100;
-            setMergeProgress(90 + (downloadProgress * 0.1)); // Last 10% is download progress
-          }
-        }
-
-        // Combine all chunks into a single Uint8Array
-        const chunksAll = new Uint8Array(receivedLength);
-        let position = 0;
-        for(const chunk of chunks) {
-          chunksAll.set(chunk, position);
-          position += chunk.length;
-        }
-        
-        const blob = new Blob([chunksAll], { type: 'application/pdf' });
+        // Handle the PDF response
+        const blob = await response.blob();
         
         if (blob.size === 0) {
-          console.error('Generated PDF is empty');
           throw new Error("Generated PDF is empty");
         }
 
-        console.log('PDF blob received', { size: blob.size / (1024 * 1024) + 'MB' });
         const url = window.URL.createObjectURL(blob);
         setMergedPdfUrl(url);
-        
-        // Complete the progress animation smoothly
-        clearInterval(progressInterval);
         setMergeProgress(100);
+        
+        // Small delay before showing complete state
         await new Promise(resolve => setTimeout(resolve, 500));
         setIsComplete(true);
 
@@ -230,28 +170,23 @@ export default function MergePDF() {
           title: "Success!",
           description: "PDFs merged successfully",
         });
+
       } catch (error) {
         clearTimeout(timeoutId);
         clearInterval(progressInterval);
         throw error;
       }
+
     } catch (error) {
       console.error("Error merging PDFs:", error);
       let errorMessage = "Failed to merge PDFs. Please try again.";
       
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "The operation took too long. Try with fewer or smaller files, or try again.";
-        } else if (error.message.includes("maximum size") || error.message.includes("size exceeds")) {
+          errorMessage = "The operation took too long. Please try with fewer or smaller files.";
+        } else {
           errorMessage = error.message;
-        } else if (error.message.includes("empty")) {
-          errorMessage = "One or more PDFs appear to be empty or corrupted.";
         }
-        console.error('Detailed error:', {
-          name: error.name,
-          message: error.message,
-          stack: error.stack
-        });
       }
 
       toast({
@@ -261,9 +196,11 @@ export default function MergePDF() {
       });
     } finally {
       setIsMerging(false);
-      setMergeProgress(0);
+      if (!isComplete) {
+        setMergeProgress(0);
+      }
     }
-  }, [files, toast]);
+  }, [files, isComplete, toast]);
 
   const resetState = useCallback(() => {
     if (mergedPdfUrl) {
