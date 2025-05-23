@@ -116,21 +116,37 @@ export default function MergePDF() {
       setIsComplete(false);
       setMergedPdfUrl(null);
 
-      let progressInterval = setInterval(() => {
-        setMergeProgress(prev => Math.min(prev + 2, 99));
-      }, 30);
+      // Start progress animation
+      const progressInterval = setInterval(() => {
+        setMergeProgress(prev => {
+          // Slow down progress as it gets higher
+          const increment = prev < 50 ? 2 : prev < 80 ? 1 : 0.5;
+          return Math.min(prev + increment, 95);
+        });
+      }, 100);
 
       const formData = new FormData();
-      files.forEach((fileItem) => {
+      let totalSize = 0;
+
+      // Validate files before sending
+      for (const fileItem of files) {
         if (!fileItem.content) {
           throw new Error(`Content not found for file ${fileItem.name}`);
         }
         const file = new File([fileItem.content], fileItem.name, { type: fileItem.type });
+        totalSize += file.size;
+        
+        if (file.size > 50 * 1024 * 1024) {
+          throw new Error(`File ${file.name} exceeds maximum size of 50MB`);
+        }
         formData.append("files", file);
-      });
+      }
+
+      if (totalSize > 100 * 1024 * 1024) {
+        throw new Error("Total file size exceeds 100MB limit");
+      }
 
       const controller = new AbortController();
-      // Increase timeout to 60 seconds for larger files
       const timeoutId = setTimeout(() => {
         controller.abort("Operation timed out after 60 seconds");
       }, 60000);
@@ -143,7 +159,6 @@ export default function MergePDF() {
         });
 
         clearTimeout(timeoutId);
-        clearInterval(progressInterval);
 
         if (!response.ok) {
           const error = await response.json();
@@ -151,11 +166,17 @@ export default function MergePDF() {
         }
 
         const blob = await response.blob();
+        if (blob.size === 0) {
+          throw new Error("Generated PDF is empty");
+        }
+
         const url = window.URL.createObjectURL(blob);
         setMergedPdfUrl(url);
         
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Complete the progress animation smoothly
+        clearInterval(progressInterval);
         setMergeProgress(100);
+        await new Promise(resolve => setTimeout(resolve, 500));
         setIsComplete(true);
 
         toast({
@@ -164,7 +185,6 @@ export default function MergePDF() {
         });
       } catch (error) {
         clearTimeout(timeoutId);
-        clearInterval(progressInterval);
         throw error;
       }
     } catch (error) {
@@ -174,8 +194,10 @@ export default function MergePDF() {
       if (error instanceof Error) {
         if (error.name === "AbortError") {
           errorMessage = "The operation took too long. Try with fewer or smaller files.";
-        } else {
+        } else if (error.message.includes("maximum size") || error.message.includes("size exceeds")) {
           errorMessage = error.message;
+        } else if (error.message.includes("empty")) {
+          errorMessage = "One or more PDFs appear to be empty or corrupted.";
         }
       }
 
@@ -186,16 +208,29 @@ export default function MergePDF() {
       });
     } finally {
       setIsMerging(false);
+      setMergeProgress(0);
     }
   }, [files, toast]);
 
   const resetState = useCallback(() => {
+    if (mergedPdfUrl) {
+      window.URL.revokeObjectURL(mergedPdfUrl);
+    }
     setFiles([]);
     setIsMerging(false);
     setMergeProgress(0);
     setIsComplete(false);
     setMergedPdfUrl(null);
-  }, []);
+  }, [mergedPdfUrl]);
+
+  // Cleanup URLs on unmount
+  useEffect(() => {
+    return () => {
+      if (mergedPdfUrl) {
+        window.URL.revokeObjectURL(mergedPdfUrl);
+      }
+    };
+  }, [mergedPdfUrl]);
 
   const handleDownload = useCallback(() => {
     if (!mergedPdfUrl) return;

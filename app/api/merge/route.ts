@@ -7,45 +7,22 @@ import path from "path";
 // Constants
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_PROCESSING_TIME = 60000; // 60 seconds
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 
-// Cache with automatic cleanup
-class PDFCache {
-  private cache = new Map<string, { data: ArrayBuffer; timestamp: number }>();
-  private cleanupInterval: NodeJS.Timeout;
+// Cache implementation with memory management
+const pdfCache = new Map<string, { data: Uint8Array; timestamp: number }>();
 
-  constructor() {
-    // Run cleanup every minute
-    this.cleanupInterval = setInterval(() => this.cleanup(), 60000);
-  }
-
-  set(key: string, data: ArrayBuffer) {
-    this.cache.set(key, { data, timestamp: Date.now() });
-  }
-
-  get(key: string): ArrayBuffer | undefined {
-    const item = this.cache.get(key);
-    if (item && Date.now() - item.timestamp < CACHE_TTL) {
-      return item.data;
-    }
-    if (item) {
-      this.cache.delete(key);
-    }
-    return undefined;
-  }
-
-  private cleanup() {
-    const now = Date.now();
-    for (const [key, item] of this.cache.entries()) {
-      if (now - item.timestamp >= CACHE_TTL) {
-        this.cache.delete(key);
-      }
+// Cleanup old cache entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of pdfCache.entries()) {
+    if (now - value.timestamp > 5 * 60 * 1000) {
+      pdfCache.delete(key);
     }
   }
-}
-
-const pdfCache = new PDFCache();
+}, 5 * 60 * 1000);
 
 // Worker thread function for PDF processing
 if (!isMainThread) {
@@ -76,18 +53,11 @@ if (!isMainThread) {
 }
 
 export async function POST(request: Request) {
-  try {
-    // Validate request method
-    if (request.method !== "POST") {
-      return NextResponse.json(
-        { error: "Method not allowed" },
-        { status: 405 }
-      );
-    }
+  const startTime = Date.now();
 
-    // Validate content type
-    const headersList = await headers();
-    const contentType = headersList.get("content-type");
+  try {
+    // Get and validate content type using request headers directly
+    const contentType = request.headers.get("content-type");
     if (!contentType?.includes("multipart/form-data")) {
       return NextResponse.json(
         { error: "Content type must be multipart/form-data" },
@@ -95,10 +65,10 @@ export async function POST(request: Request) {
       );
     }
 
+    // Get and validate files
     const formData = await request.formData();
     const files = formData.getAll("files") as File[];
 
-    // Validate files
     if (!files || files.length < 2) {
       return NextResponse.json(
         { error: "At least two PDF files are required" },
@@ -106,9 +76,16 @@ export async function POST(request: Request) {
       );
     }
 
-    // Validate file sizes
+    // Validate file sizes and types
     let totalSize = 0;
     for (const file of files) {
+      if (!file.type || file.type !== "application/pdf") {
+        return NextResponse.json(
+          { error: `File ${file.name} is not a valid PDF` },
+          { status: 400 }
+        );
+      }
+
       if (file.size > MAX_FILE_SIZE) {
         return NextResponse.json(
           { error: `File ${file.name} exceeds maximum size of 50MB` },
@@ -125,72 +102,103 @@ export async function POST(request: Request) {
       );
     }
 
+    // Generate cache key based on file metadata
+    const cacheKey = files
+      .map(f => `${f.name}-${f.size}-${f.lastModified}`)
+      .sort()
+      .join("|");
+
     // Check cache
-    const cacheKey = files.map(f => `${f.name}-${f.size}`).sort().join("|");
-    const cachedPdf = pdfCache.get(cacheKey);
-    if (cachedPdf) {
-      return new NextResponse(cachedPdf, {
+    const cachedResult = pdfCache.get(cacheKey);
+    if (cachedResult && Date.now() - cachedResult.timestamp < 5 * 60 * 1000) {
+      return new NextResponse(cachedResult.data, {
         headers: {
           "Content-Type": "application/pdf",
-          "Content-Disposition": "attachment; filename=merged.pdf",
-          "Cache-Control": "public, max-age=300",
+          "Content-Disposition": `attachment; filename="merged-${new Date().toISOString().slice(0, 10)}.pdf"`,
+          "Cache-Control": "private, max-age=300",
+          "Content-Length": cachedResult.data.byteLength.toString(),
+          "X-Cache": "HIT"
         },
       });
     }
 
-    // Convert files to array buffers
-    const pdfBuffers = await Promise.all(
-      files.map(file => file.arrayBuffer())
-    );
-
-    // Process PDFs in a worker thread
-    const worker = new Worker(__filename, {
-      workerData: { pdfs: pdfBuffers },
-    });
-
-    const result = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        worker.terminate();
-        reject(new Error("PDF processing timeout"));
-      }, REQUEST_TIMEOUT);
-
-      worker.on("message", (result) => {
-        clearTimeout(timeout);
-        if (result.error) {
-          reject(new Error(result.error));
-        } else {
-          resolve(result);
+    // Create a new PDF document with optimized settings
+    const mergedPdf = await PDFDocument.create();
+    
+    // Process each PDF file with proper error handling
+    for (const file of files) {
+      try {
+        // Check for timeout
+        if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+          throw new Error("Processing timeout exceeded");
         }
-      });
 
-      worker.on("error", reject);
-      worker.on("exit", (code) => {
-        clearTimeout(timeout);
-        if (code !== 0) {
-          reject(new Error(`Worker stopped with exit code ${code}`));
+        // Read file as array buffer
+        const fileBuffer = await file.arrayBuffer();
+        
+        // Load and validate PDF
+        const pdfDoc = await PDFDocument.load(new Uint8Array(fileBuffer), {
+          updateMetadata: false,
+          ignoreEncryption: true
+        });
+
+        // Check if PDF is valid
+        if (pdfDoc.getPageCount() === 0) {
+          throw new Error(`${file.name} appears to be empty or corrupted`);
         }
-      });
-    });
 
-    const mergedPdfBytes = result as ArrayBuffer;
+        // Copy pages with optimized settings
+        const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+        pages.forEach(page => mergedPdf.addPage(page));
+
+        // Clean up memory
+        fileBuffer.slice(0);
+
+      } catch (error) {
+        console.error(`Error processing file ${file.name}:`, error);
+        return NextResponse.json(
+          { 
+            error: `Failed to process ${file.name}. Please ensure it's a valid PDF file and not password protected.` 
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Save the merged PDF with optimized settings
+    const mergedPdfBytes = await mergedPdf.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+      objectsPerTick: 100
+    });
 
     // Cache the result
-    pdfCache.set(cacheKey, mergedPdfBytes);
+    pdfCache.set(cacheKey, {
+      data: mergedPdfBytes,
+      timestamp: Date.now()
+    });
 
-    // Return the merged PDF
+    // Return the merged PDF with appropriate headers
     return new NextResponse(mergedPdfBytes, {
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": "attachment; filename=merged.pdf",
-        "Cache-Control": "public, max-age=300",
+        "Content-Disposition": `attachment; filename="merged-${new Date().toISOString().slice(0, 10)}.pdf"`,
+        "Cache-Control": "private, no-store",
+        "Content-Length": mergedPdfBytes.byteLength.toString(),
+        "X-Cache": "MISS",
+        "X-Processing-Time": `${Date.now() - startTime}ms`
       },
     });
+
   } catch (error) {
     console.error("Error merging PDFs:", error);
-    const errorMessage = error instanceof Error ? error.message : "Failed to merge PDFs";
+    const errorMessage = error instanceof Error 
+      ? error.message 
+      : "An unexpected error occurred while merging PDFs";
+
     return NextResponse.json(
       { error: errorMessage },
-      { status: 500 }
+      { status: error instanceof Error && error.message.includes("timeout") ? 408 : 500 }
     );
   }
 } 
