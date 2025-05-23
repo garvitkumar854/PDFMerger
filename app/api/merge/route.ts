@@ -79,11 +79,13 @@ if (!isMainThread) {
 
 export async function POST(request: Request) {
   const startTime = Date.now();
+  console.log('PDF merge request received');
 
   try {
     // Get and validate content type using request headers directly
     const contentType = request.headers.get("content-type");
     if (!contentType?.includes("multipart/form-data")) {
+      console.error('Invalid content type:', contentType);
       return NextResponse.json(
         { error: "Content type must be multipart/form-data" },
         { status: 400 }
@@ -93,8 +95,10 @@ export async function POST(request: Request) {
     // Get and validate files
     const formData = await request.formData();
     const files = formData.getAll("files") as File[];
+    console.log('Files received:', files.map(f => ({ name: f.name, size: f.size / (1024 * 1024) + 'MB', type: f.type })));
 
     if (!files || files.length < 2) {
+      console.error('Invalid number of files:', files?.length);
       return NextResponse.json(
         { error: "At least two PDF files are required" },
         { status: 400 }
@@ -105,6 +109,7 @@ export async function POST(request: Request) {
     let totalSize = 0;
     for (const file of files) {
       if (!file.type || file.type !== "application/pdf") {
+        console.error('Invalid file type:', { name: file.name, type: file.type });
         return NextResponse.json(
           { error: `File ${file.name} is not a valid PDF` },
           { status: 400 }
@@ -112,6 +117,7 @@ export async function POST(request: Request) {
       }
 
       if (file.size > MAX_FILE_SIZE) {
+        console.error('File too large:', { name: file.name, size: file.size / (1024 * 1024) + 'MB' });
         return NextResponse.json(
           { error: `File ${file.name} exceeds maximum size of 50MB` },
           { status: 400 }
@@ -121,6 +127,7 @@ export async function POST(request: Request) {
     }
 
     if (totalSize > MAX_TOTAL_SIZE) {
+      console.error('Total size too large:', totalSize / (1024 * 1024) + 'MB');
       return NextResponse.json(
         { error: "Total file size exceeds 100MB limit" },
         { status: 400 }
@@ -136,6 +143,7 @@ export async function POST(request: Request) {
     // Check cache
     const cachedResult = pdfCache.get(cacheKey);
     if (cachedResult && Date.now() - cachedResult.timestamp < 5 * 60 * 1000) {
+      console.log('Cache hit for files:', files.map(f => f.name));
       return new NextResponse(cachedResult.data, {
         headers: {
           "Content-Type": "application/pdf",
@@ -147,6 +155,7 @@ export async function POST(request: Request) {
       });
     }
 
+    console.log('Starting PDF merge process');
     // Create a new PDF document with optimized settings
     const mergedPdf = await PDFDocument.create();
     
@@ -155,9 +164,11 @@ export async function POST(request: Request) {
       try {
         // Check for timeout
         if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+          console.error('Processing timeout exceeded');
           throw new Error("Processing timeout exceeded");
         }
 
+        console.log(`Processing file: ${file.name}`);
         // Read file as array buffer
         const fileBuffer = await file.arrayBuffer();
         
@@ -169,9 +180,11 @@ export async function POST(request: Request) {
 
         // Check if PDF is valid
         if (pdfDoc.getPageCount() === 0) {
+          console.error(`Empty or corrupted PDF: ${file.name}`);
           throw new Error(`${file.name} appears to be empty or corrupted`);
         }
 
+        console.log(`Pages in ${file.name}: ${pdfDoc.getPageCount()}`);
         // Process PDF in chunks to prevent timeouts
         await processPDFChunks(pdfDoc, mergedPdf, startTime);
 
@@ -189,6 +202,7 @@ export async function POST(request: Request) {
       }
     }
 
+    console.log('Saving merged PDF');
     // Save the merged PDF with optimized settings
     const mergedPdfBytes = await mergedPdf.save({
       useObjectStreams: true,
@@ -196,11 +210,15 @@ export async function POST(request: Request) {
       objectsPerTick: 50 // Reduced for better stability
     });
 
+    console.log('Merged PDF size:', mergedPdfBytes.byteLength / (1024 * 1024) + 'MB');
     // Cache the result
     pdfCache.set(cacheKey, {
       data: mergedPdfBytes,
       timestamp: Date.now()
     });
+
+    const processingTime = Date.now() - startTime;
+    console.log('PDF merge complete. Processing time:', processingTime + 'ms');
 
     // Return the merged PDF with appropriate headers
     return new NextResponse(mergedPdfBytes, {
@@ -210,7 +228,7 @@ export async function POST(request: Request) {
         "Cache-Control": "private, no-store",
         "Content-Length": mergedPdfBytes.byteLength.toString(),
         "X-Cache": "MISS",
-        "X-Processing-Time": `${Date.now() - startTime}ms`
+        "X-Processing-Time": `${processingTime}ms`
       },
     });
 

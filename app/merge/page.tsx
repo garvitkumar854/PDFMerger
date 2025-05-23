@@ -146,6 +146,11 @@ export default function MergePDF() {
         throw new Error("Total file size exceeds 100MB limit");
       }
 
+      console.log('Starting PDF merge request...', {
+        fileCount: files.length,
+        totalSize: totalSize / (1024 * 1024) + 'MB'
+      });
+
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
         controller.abort("Operation timed out after 60 seconds");
@@ -161,15 +166,24 @@ export default function MergePDF() {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || "Failed to merge PDFs");
+          const errorData = await response.json();
+          console.error('Server response error:', {
+            status: response.status,
+            statusText: response.statusText,
+            error: errorData
+          });
+          throw new Error(errorData.error || "Failed to merge PDFs");
         }
 
+        console.log('PDF merge response received');
         const blob = await response.blob();
+        
         if (blob.size === 0) {
+          console.error('Generated PDF is empty');
           throw new Error("Generated PDF is empty");
         }
 
+        console.log('PDF blob received', { size: blob.size / (1024 * 1024) + 'MB' });
         const url = window.URL.createObjectURL(blob);
         setMergedPdfUrl(url);
         
@@ -199,6 +213,11 @@ export default function MergePDF() {
         } else if (error.message.includes("empty")) {
           errorMessage = "One or more PDFs appear to be empty or corrupted.";
         }
+        console.error('Detailed error:', {
+          name: error.name,
+          message: error.message,
+          stack: error.stack
+        });
       }
 
       toast({
