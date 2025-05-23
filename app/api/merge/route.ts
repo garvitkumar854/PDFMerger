@@ -7,9 +7,10 @@ import path from "path";
 // Constants
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
-const MAX_PROCESSING_TIME = 60000; // 60 seconds
+const MAX_PROCESSING_TIME = 120000; // 120 seconds (increased from 60)
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const REQUEST_TIMEOUT = 30000; // 30 seconds
+const CHUNK_SIZE = 5; // Process 5 pages at a time
 
 // Cache implementation with memory management
 const pdfCache = new Map<string, { data: Uint8Array; timestamp: number }>();
@@ -23,6 +24,30 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000);
+
+// Helper function to process PDF chunks
+async function processPDFChunks(pdfDoc: PDFDocument, mergedPdf: PDFDocument, startTime: number): Promise<void> {
+  const pageCount = pdfDoc.getPageCount();
+  const chunks = Math.ceil(pageCount / CHUNK_SIZE);
+
+  for (let i = 0; i < chunks; i++) {
+    // Check for timeout
+    if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+      throw new Error("Processing timeout exceeded");
+    }
+
+    const start = i * CHUNK_SIZE;
+    const end = Math.min((i + 1) * CHUNK_SIZE, pageCount);
+    const pageIndices = Array.from({ length: end - start }, (_, idx) => start + idx);
+
+    // Copy and add pages in chunks
+    const pages = await mergedPdf.copyPages(pdfDoc, pageIndices);
+    pages.forEach(page => mergedPdf.addPage(page));
+
+    // Allow event loop to process other tasks
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+}
 
 // Worker thread function for PDF processing
 if (!isMainThread) {
@@ -147,9 +172,8 @@ export async function POST(request: Request) {
           throw new Error(`${file.name} appears to be empty or corrupted`);
         }
 
-        // Copy pages with optimized settings
-        const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
-        pages.forEach(page => mergedPdf.addPage(page));
+        // Process PDF in chunks to prevent timeouts
+        await processPDFChunks(pdfDoc, mergedPdf, startTime);
 
         // Clean up memory
         fileBuffer.slice(0);
@@ -169,7 +193,7 @@ export async function POST(request: Request) {
     const mergedPdfBytes = await mergedPdf.save({
       useObjectStreams: true,
       addDefaultPage: false,
-      objectsPerTick: 100
+      objectsPerTick: 50 // Reduced for better stability
     });
 
     // Cache the result

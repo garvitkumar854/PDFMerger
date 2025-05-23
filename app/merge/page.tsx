@@ -38,7 +38,7 @@ export default function MergePDF() {
   // Protect the route
   useEffect(() => {
     if (isLoaded && !userId) {
-      router.push("/sign-in?redirect_url=/merge");
+      router.push(`/sign-in?fallbackRedirectUrl=${encodeURIComponent("/merge")}`);
     }
   }, [isLoaded, userId, router]);
 
