@@ -4,7 +4,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { FileUpload } from "@/components/ui/file-upload";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { FileText, X, Upload, CheckCircle2, Download, ArrowLeft, Shield, GripVertical, Plus } from "lucide-react";
+import { FileText, X, Upload, CheckCircle2, Download, ArrowLeft, Shield, GripVertical, Plus, AlertCircle } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
@@ -63,14 +63,19 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm hover:bg-primary/5 transition-colors"
+      className="flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm hover:bg-primary/5 transition-colors group"
     >
       <div className="flex items-center gap-3 flex-1 min-w-0" {...attributes} {...listeners}>
-        <GripVertical className="h-5 w-5 text-muted-foreground flex-shrink-0 cursor-grab" />
+        <GripVertical className="h-5 w-5 text-muted-foreground flex-shrink-0 cursor-grab opacity-0 group-hover:opacity-100 transition-opacity" />
         <div className="flex items-center gap-3 truncate flex-1 min-w-0">
-          <FileText className="h-5 w-5 text-primary flex-shrink-0" />
+          <div className="relative">
+            <FileText className="h-5 w-5 text-primary flex-shrink-0" />
+            {file.content && (
+              <div className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full" />
+            )}
+          </div>
           <span className="font-medium truncate">{file.name}</span>
-          <span className="text-sm text-muted-foreground">
+          <span className="text-sm text-muted-foreground whitespace-nowrap">
             ({(file.size / (1024 * 1024)).toFixed(1)} MB)
           </span>
         </div>
@@ -79,7 +84,7 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
         variant="ghost"
         size="icon"
         onClick={() => onRemove(file)}
-        className="h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2"
+        className="h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2 opacity-0 group-hover:opacity-100 transition-opacity"
       >
         <X className="h-4 w-4" />
       </Button>
@@ -146,7 +151,8 @@ export default function MergePDF() {
         })
       );
 
-      setFiles(newFiles);
+      // Update files state, adding new files to the existing ones
+      setFiles(prevFiles => [...prevFiles, ...newFiles]);
 
       // Reset merge states when files change
       if (mergedPdfUrl) {
@@ -199,9 +205,6 @@ export default function MergePDF() {
       
       return newFiles;
     });
-
-    // Trigger FileUpload component reset
-    window.dispatchEvent(new Event('reset-file-upload'));
 
     // Show removal notification
     setTimeout(() => {
@@ -476,8 +479,8 @@ export default function MergePDF() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <div className="container mx-auto py-4 sm:py-6 md:py-8 px-4 sm:px-6 md:max-w-2xl">
+    <div className="min-h-screen bg-gradient-to-b from-background to-background/80">
+      <div className="container mx-auto py-4 sm:py-6 md:py-8 px-4 sm:px-6 md:max-w-3xl">
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-8 sm:mb-12">
           <Link 
             href="/" 
@@ -492,41 +495,50 @@ export default function MergePDF() {
         </div>
 
         {!isComplete ? (
-          <div className="space-y-4 sm:space-y-6">
-            <div className="p-1 rounded-xl bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20">
-              <FileUpload
-                onFilesSelected={handleFilesSelected}
-                maxFiles={MAX_FILES}
-                acceptedFileTypes={["application/pdf"]}
-                className="bg-card shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[300px]"
-                hideFileList={true}
-                onError={(error) => {
-                  toast({
-                    title: "Error",
-                    description: error,
-                    variant: "destructive",
-                  });
-                }}
-                customText={{
-                  main: files.length === 0 
-                    ? "Drop your PDF files here or click to browse" 
-                    : "Drop more PDF files here or click to browse",
-                  details: (() => {
-                    const { totalSize, remainingSize, totalFiles, remainingFiles } = getRemainingCapacity();
-                    if (totalFiles === 0) {
-                      return `Upload up to ${MAX_FILES} PDF files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB total)`;
-                    }
-                    return `${totalFiles}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used, ${(remainingSize / (1024 * 1024)).toFixed(1)}MB remaining)`;
-                  })()
-                }}
-              />
+          <div className="space-y-6">
+            <div className="relative">
+              <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-xl blur-xl" />
+              <div className="relative">
+                <FileUpload
+                  onFilesSelected={handleFilesSelected}
+                  maxFiles={MAX_FILES}
+                  acceptedFileTypes={["application/pdf"]}
+                  className="bg-card/95 shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[300px] backdrop-blur-sm"
+                  hideFileList={true}
+                  onError={(error) => {
+                    toast({
+                      title: "Error",
+                      description: error,
+                      variant: "destructive",
+                    });
+                  }}
+                  customText={{
+                    main: files.length === 0 
+                      ? "Drop your PDF files here or click to browse" 
+                      : "Drop more PDF files here or click to browse",
+                    details: (() => {
+                      const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+                      const remainingSize = MAX_TOTAL_SIZE - totalSize;
+                      if (files.length === 0) {
+                        return `Upload up to ${MAX_FILES} PDF files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB total)`;
+                      }
+                      return `${files.length}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used, ${(remainingSize / (1024 * 1024)).toFixed(1)}MB remaining)`;
+                    })()
+                  }}
+                />
+              </div>
             </div>
 
-            {files.length > 0 ? (
-              <div className="space-y-4 bg-card p-4 sm:p-6 rounded-xl shadow-lg border border-primary/20">
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4">
-                  <div className="space-y-1 w-full sm:w-auto">
-                    <h2 className="text-lg font-semibold text-foreground">Selected Files</h2>
+            {files.length > 0 && (
+              <div className="space-y-4 bg-card/95 p-6 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="space-y-1.5 w-full sm:w-auto">
+                    <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+                      Selected Files
+                      <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-2.5 py-0.5 text-sm font-medium text-primary">
+                        {files.length}
+                      </span>
+                    </h2>
                     <p className="text-sm text-muted-foreground">
                       {files.length} file{files.length !== 1 ? 's' : ''} selected ({(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)
                     </p>
@@ -562,63 +574,72 @@ export default function MergePDF() {
                   </SortableContext>
                 </DndContext>
 
-                <Button
-                  onClick={handleMerge}
-                  disabled={isMerging || files.length < 2}
-                  className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-6 text-base sm:text-lg"
-                >
-                  {isMerging ? (
-                    <>
-                      <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
-                      Merging...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
-                      Merge PDFs ({files.length} files)
-                    </>
-                  )}
-                </Button>
+                {files.length >= 2 ? (
+                  <div className="space-y-4">
+                    <Button
+                      onClick={handleMerge}
+                      disabled={isMerging}
+                      className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-6 text-base sm:text-lg"
+                    >
+                      {isMerging ? (
+                        <>
+                          <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+                          Merging...
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
+                          Merge PDFs ({files.length} files)
+                        </>
+                      )}
+                    </Button>
 
-                {isMerging && (
-                  <div className="space-y-2">
-                    <Progress value={mergeProgress} className="h-2 sm:h-3" />
-                    <p className="text-sm sm:text-base text-muted-foreground text-center">
-                      Processing... {Math.round(mergeProgress)}%
-                    </p>
+                    {isMerging && (
+                      <div className="space-y-2">
+                        <Progress value={mergeProgress} className="h-2 sm:h-3" />
+                        <p className="text-sm sm:text-base text-muted-foreground text-center">
+                          Processing... {Math.round(mergeProgress)}%
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-lg p-3">
+                    <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                    Add at least one more PDF file to merge
                   </div>
                 )}
               </div>
-            ) : null}
+            )}
           </div>
         ) : (
-          <div className="bg-card p-6 sm:p-8 rounded-xl shadow-lg border border-primary/20 text-center">
+          <div className="bg-card/95 p-8 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm text-center">
             <div className="rounded-full bg-primary/10 p-4 w-fit mx-auto mb-6">
-              <CheckCircle2 className="h-8 w-8 sm:h-10 sm:w-10 text-primary" />
+              <CheckCircle2 className="h-10 w-10 text-primary" />
             </div>
             
-            <h2 className="text-xl sm:text-2xl font-semibold text-foreground mb-3">PDF Merged Successfully!</h2>
-            <p className="text-muted-foreground mb-6 sm:mb-8">
+            <h2 className="text-2xl font-semibold text-foreground mb-3">PDF Merged Successfully!</h2>
+            <p className="text-muted-foreground mb-8">
               Your files have been combined into a single PDF
             </p>
-            
-            <div className="flex flex-col gap-3 sm:gap-4">
+              
+            <div className="flex flex-col gap-4">
               <Button
                 onClick={handleDownload}
                 size="lg"
-                className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-6 text-base sm:text-lg"
+                className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-6 text-lg"
               >
-                <Download className="h-4 w-4 sm:h-5 sm:w-5" />
+                <Download className="h-5 w-5" />
                 Download PDF
               </Button>
-              
+                
               <Button
                 onClick={handleClearAll}
                 variant="outline"
                 size="lg"
-                className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-6 text-base sm:text-lg"
+                className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-6 text-lg"
               >
-                <Plus className="h-4 w-4 sm:h-5 sm:w-5" />
+                <Plus className="h-5 w-5" />
                 Merge More PDFs
               </Button>
             </div>

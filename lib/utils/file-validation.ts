@@ -11,7 +11,6 @@ export interface ValidationResult {
   valid: boolean;
   error?: FileValidationError;
   validFiles: File[];
-  duplicates: File[];
   invalidFiles: Array<{ file: File; reason: string }>;
 }
 
@@ -19,11 +18,11 @@ export interface ValidationResult {
 let processedFiles = new Set<string>();
 
 export function clearProcessedFiles() {
-  processedFiles = new Set<string>(); // Create a new Set instead of clearing
+  processedFiles = new Set<string>();
 }
 
-export function removeFromProcessedFiles(filename: string, fileSize?: number, lastModified?: number): void {
-  // This function is kept for backward compatibility but now just calls clearProcessedFiles
+export function removeFromProcessedFiles(filename: string) {
+  // This function is kept for backward compatibility
   clearProcessedFiles();
 }
 
@@ -65,7 +64,6 @@ export async function validateFiles(
   const result: ValidationResult = {
     valid: false,
     validFiles: [],
-    duplicates: [],
     invalidFiles: []
   };
 
@@ -98,18 +96,8 @@ export async function validateFiles(
     return result;
   }
 
-  // Add existing files to processed set if not already there
-  existingFiles.forEach(file => {
-    const normalizedName = normalizeFileName(file);
-    if (!processedFiles.has(normalizedName)) {
-      processedFiles.add(normalizedName);
-    }
-  });
-
   // Process each file
   for (const file of newFiles) {
-    const normalizedName = normalizeFileName(file);
-
     // Skip empty files
     if (file.size === 0) {
       result.invalidFiles.push({
@@ -125,12 +113,6 @@ export async function validateFiles(
         file,
         reason: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`
       });
-      continue;
-    }
-
-    // Check for duplicates using normalized name
-    if (processedFiles.has(normalizedName)) {
-      result.duplicates.push(file);
       continue;
     }
 
@@ -153,23 +135,12 @@ export async function validateFiles(
       continue;
     }
 
-    // If all validations pass, add to valid files and processed set
+    // If all validations pass, add to valid files
     result.validFiles.push(file);
-    processedFiles.add(normalizedName);
   }
 
   // Set final validation status
   result.valid = result.validFiles.length > 0 && result.invalidFiles.length === 0;
-
-  // If there are only duplicates, set specific error
-  if (result.duplicates.length > 0 && result.validFiles.length === 0 && result.invalidFiles.length === 0) {
-    result.error = {
-      code: 'ALL_DUPLICATES',
-      message: result.duplicates.length === 1
-        ? `${result.duplicates[0].name} has already been added`
-        : `All selected files are duplicates`
-    };
-  }
 
   return result;
 }

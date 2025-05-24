@@ -212,6 +212,25 @@ async function retryOperation<T>(
   throw lastError;
 }
 
+// Helper function to get error message
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+// Helper function to create error response
+function createErrorResponse(message: string, status = 400) {
+  return new Response(
+    JSON.stringify({ error: message }),
+    {
+      status,
+      headers: { 'Content-Type': 'application/json' }
+    }
+  );
+}
+
 export async function POST(request: Request) {
   const startTime = Date.now();
   const requestId = createHash('sha256').update(Date.now().toString()).digest('hex').slice(0, 8);
@@ -229,7 +248,7 @@ export async function POST(request: Request) {
     // Content type validation
     const contentType = request.headers.get("content-type");
     if (!contentType?.includes("multipart/form-data")) {
-      throw new Error("Content type must be multipart/form-data");
+      return createErrorResponse("Content type must be multipart/form-data");
     }
 
     const userAgent = request.headers.get('user-agent') || 'Unknown';
@@ -239,7 +258,7 @@ export async function POST(request: Request) {
     const files = formData.getAll("files") as File[];
 
     if (!files || files.length < 2) {
-      throw new Error("At least two PDF files are required");
+      return createErrorResponse("At least two PDF files are required");
     }
 
     // Validate and prepare files with optimized loading
@@ -264,33 +283,37 @@ export async function POST(request: Request) {
         throw new Error("Total file size exceeds 100MB limit");
       }
 
-      // Optimized file loading based on size with retry
-      const buffer = await retryOperation(async () => {
-        if (file.size < SMALL_FILE_THRESHOLD) {
-          return await file.arrayBuffer();
-        } else {
-          const chunks: Uint8Array[] = [];
-          const reader = file.stream().getReader();
-          const chunkSize = file.size < MEDIUM_FILE_THRESHOLD ? 1024 * 1024 : CHUNK_SIZE;
-          
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
+      try {
+        // Optimized file loading based on size with retry
+        const buffer = await retryOperation(async () => {
+          if (file.size < SMALL_FILE_THRESHOLD) {
+            return await file.arrayBuffer();
+          } else {
+            const chunks: Uint8Array[] = [];
+            const reader = file.stream().getReader();
+            const chunkSize = file.size < MEDIUM_FILE_THRESHOLD ? 1024 * 1024 : CHUNK_SIZE;
             
-            if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-              throw new Error("Processing timeout exceeded");
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              
+              if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+                throw new Error("Processing timeout exceeded");
+              }
             }
+
+            return await new Blob(chunks).arrayBuffer();
           }
+        });
 
-          return await new Blob(chunks).arrayBuffer();
-        }
-      });
-
-      const hash = createHash('sha256').update(new Uint8Array(buffer)).digest('hex');
-      
-      pdfBuffers.push(buffer);
-      fileMetadata.push({ name: file.name, size: file.size, hash });
+        const hash = createHash('sha256').update(new Uint8Array(buffer)).digest('hex');
+        
+        pdfBuffers.push(buffer);
+        fileMetadata.push({ name: file.name, size: file.size, hash });
+      } catch (error) {
+        throw new Error(`Failed to load ${file.name}: ${getErrorMessage(error)}`);
+      }
     }));
 
     // Generate cache key
@@ -305,98 +328,50 @@ export async function POST(request: Request) {
 
     console.log(`[${requestId}] Cache miss. Processing files...`);
 
-    // Process PDFs in parallel with priority and retry
-    const processPromises = pdfBuffers.map((buffer, index) => {
-      const priority = buffer.byteLength < SMALL_FILE_THRESHOLD ? 3 : 
-                      buffer.byteLength < MEDIUM_FILE_THRESHOLD ? 2 : 1;
+    // Create a new PDF document
+    const mergedPdf = await PDFDocument.create();
 
-      return retryOperation(async () => {
-        if (!buffer || buffer.byteLength < 5) {
-          throw new Error(`Invalid PDF buffer for file ${fileMetadata[index].name}`);
-        }
+    // Process each PDF file
+    for (let index = 0; index < pdfBuffers.length; index++) {
+      try {
+        const pdfDoc = await PDFDocument.load(pdfBuffers[index], {
+          ignoreEncryption: true,
+        });
 
-        const uint8Buffer = new Uint8Array(buffer);
-        const result = await workerPool.processTask({ 
-          pdfBuffer: uint8Buffer.buffer,
-          fileName: fileMetadata[index].name
-        }, priority);
+        const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+        pages.forEach((page) => {
+          mergedPdf.addPage(page);
+        });
 
-        if (!result.success) {
-          throw new Error(result.error || 'Unknown processing error');
-        }
-
-        if (!result.buffer || !(result.buffer instanceof ArrayBuffer)) {
-          throw new Error('Invalid worker response: missing or invalid buffer');
-        }
-
-        return result;
-      });
-    });
-
-    const results = await Promise.all(processPromises);
-    console.log(`[${requestId}] All workers completed processing`);
-
-    // Merge processed PDFs with optimized settings and retry
-    const mergedPdfBytes = await retryOperation(async () => {
-      const mergedPdf = await PDFDocument.create();
-      let totalPages = 0;
-
-      for (const [index, result] of results.entries()) {
-        try {
-          const pdfDoc = await PDFDocument.load(result.buffer, {
-            updateMetadata: false,
-            ignoreEncryption: true,
-            parseSpeed: totalSize < MEDIUM_FILE_THRESHOLD ? 1000 : 500
-          });
-
-          const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
-          pages.forEach(page => mergedPdf.addPage(page));
-          totalPages += pages.length;
-
-          console.log(`[${requestId}] Processed ${fileMetadata[index].name}: ${pages.length} pages`);
-        } catch (error) {
-          throw new Error(`Failed to process ${fileMetadata[index].name}: ${error.message}`);
-        }
-
-        if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-          throw new Error("Processing timeout exceeded");
-        }
+        console.log(`[${requestId}] Processed ${fileMetadata[index].name}: ${pages.length} pages`);
+      } catch (error) {
+        throw new Error(`Failed to process ${fileMetadata[index].name}: ${getErrorMessage(error)}`);
       }
 
-      return await mergedPdf.save({
-        useObjectStreams: totalSize >= MEDIUM_FILE_THRESHOLD,
-        addDefaultPage: false,
-        objectsPerTick: totalSize < SMALL_FILE_THRESHOLD ? 1000 :
-                       totalSize < MEDIUM_FILE_THRESHOLD ? 500 :
-                       Math.min(100, Math.max(50, Math.floor(totalPages / 5))),
-        updateFieldAppearances: false
-      });
-    });
+      if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+        throw new Error("Processing timeout exceeded");
+      }
+    }
+
+    // Save the merged PDF
+    const mergedPdfBytes = await mergedPdf.save();
+    const mergedBuffer = new Uint8Array(mergedPdfBytes);
 
     // Cache the result
-    pdfCache.set(cacheKey, mergedPdfBytes);
+    pdfCache.set(cacheKey, mergedBuffer);
 
-    const processingTime = Date.now() - startTime;
-    console.log(`[${requestId}] Completed merging in ${processingTime}ms`);
-    console.log(`[${requestId}] Cache stats:`, pdfCache.getStats());
-
-    return createStreamingResponse(mergedPdfBytes, `merged-${new Date().toISOString().slice(0, 10)}.pdf`);
+    console.log(`[${requestId}] Successfully merged ${files.length} files`);
+    return createStreamingResponse(mergedBuffer, `merged-${new Date().toISOString().slice(0, 10)}.pdf`);
 
   } catch (error) {
-    console.error(`[${requestId}] PDF merge error:`, error);
-    const message = error instanceof Error ? error.message : "An unexpected error occurred";
-    return NextResponse.json({ 
-      error: message,
-      requestId,
-      timestamp: new Date().toISOString()
-    }, { 
-      status: 500,
-      headers: {
-        'Cache-Control': 'no-store'
-      }
-    });
+    console.error(`[${requestId}] Error:`, error);
+    return createErrorResponse(getErrorMessage(error));
   } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-    if (abortController) abortController.abort();
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (abortController) {
+      abortController.abort();
+    }
   }
 } 

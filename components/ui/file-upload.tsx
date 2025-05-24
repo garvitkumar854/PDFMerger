@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, File, X } from 'lucide-react';
+import { Upload, FileIcon, CloudUpload } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { validateFiles, clearProcessedFiles, removeFromProcessedFiles } from '@/lib/utils/file-validation';
+import { validateFiles, clearProcessedFiles } from '@/lib/utils/file-validation';
 
 interface FileUploadProps {
   onFilesSelected: (files: File[]) => void;
@@ -27,70 +27,32 @@ export function FileUpload({
   onError,
   customText
 }: FileUploadProps) {
-  const [files, setFiles] = useState<File[]>([]);
   const [isValidating, setIsValidating] = useState(false);
   const processingRef = useRef(false);
 
-  // Clear processed files when component unmounts
-  useEffect(() => {
-    return () => {
-      clearProcessedFiles();
-    };
-  }, []);
-
-  // Reset internal state when external files change
-  useEffect(() => {
-    const handleReset = () => {
-      setFiles([]);
-      clearProcessedFiles();
-    };
-
-    // Listen for custom reset event
-    window.addEventListener('reset-file-upload', handleReset);
-    return () => {
-      window.removeEventListener('reset-file-upload', handleReset);
-    };
-  }, []);
-
   const handleFilesSelected = useCallback(async (newFiles: File[]) => {
-    // Prevent concurrent processing
     if (processingRef.current) return;
     processingRef.current = true;
 
     try {
       setIsValidating(true);
-      clearProcessedFiles(); // Clear before validation
+      clearProcessedFiles();
 
-      // Validate files
-      const validationResult = await validateFiles(newFiles, files);
+      const validationResult = await validateFiles(newFiles);
 
-      // Handle validation results
       if (!validationResult.valid) {
         if (validationResult.error) {
           onError?.(validationResult.error.message);
-        } else {
-          // Handle invalid files
-          if (validationResult.invalidFiles.length > 0) {
-            const messages = validationResult.invalidFiles.map(
-              ({ file, reason }) => `${file.name}: ${reason}`
-            );
-            onError?.(messages.join('\n'));
-          }
-          // Handle duplicates separately
-          if (validationResult.duplicates.length > 0) {
-            const duplicateMessage = validationResult.duplicates.length === 1
-              ? `${validationResult.duplicates[0].name} has already been added`
-              : `${validationResult.duplicates.length} files were skipped (duplicates)`;
-            onError?.(duplicateMessage);
-          }
+        } else if (validationResult.invalidFiles.length > 0) {
+          const messages = validationResult.invalidFiles.map(
+            ({ file, reason }) => `${file.name}: ${reason}`
+          );
+          onError?.(messages.join('\n'));
         }
       }
 
-      // Update files if we have valid ones
       if (validationResult.validFiles.length > 0) {
-        const updatedFiles = [...files, ...validationResult.validFiles];
-        setFiles(updatedFiles);
-        onFilesSelected(updatedFiles);
+        onFilesSelected(validationResult.validFiles);
       }
     } catch (error) {
       onError?.(error instanceof Error ? error.message : 'Failed to process files');
@@ -98,116 +60,114 @@ export function FileUpload({
       setIsValidating(false);
       processingRef.current = false;
     }
-  }, [files, onFilesSelected, onError]);
-
-  const removeFile = useCallback((index: number) => {
-    setFiles(prevFiles => {
-      const fileToRemove = prevFiles[index];
-      if (fileToRemove) {
-        clearProcessedFiles();
-        const newFiles = prevFiles.filter((_, i) => i !== index);
-        onFilesSelected(newFiles);
-        return newFiles;
-      }
-      return prevFiles;
-    });
-  }, [onFilesSelected]);
+  }, [onFilesSelected, onError]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: handleFilesSelected,
     accept: {
       'application/pdf': ['.pdf']
     },
-    maxFiles: maxFiles - files.length,
-    disabled: isValidating || files.length >= maxFiles,
+    maxFiles,
+    disabled: isValidating,
     noClick: isValidating,
     noDrag: isValidating
   });
 
-  // Calculate total size
-  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-  const totalSizeMB = (totalSize / (1024 * 1024)).toFixed(1);
+  // Extract only the necessary props from getRootProps
+  const { ref, ...rootProps } = getRootProps();
 
   return (
     <div className={cn("flex flex-col gap-4", className)}>
-      <div
-        {...getRootProps()}
-        className={cn(
-          "relative border-2 border-dashed rounded-lg p-6",
-          "transition-all duration-300 ease-in-out",
-          isDragActive 
-            ? "border-primary bg-primary/5" 
-            : "border-muted hover:border-primary/50 hover:bg-primary/5",
-          isValidating && "opacity-50 cursor-wait",
-          files.length >= maxFiles && "opacity-50 cursor-not-allowed"
-        )}
-      >
-        <input {...getInputProps()} />
-        <div className="flex flex-col items-center justify-center gap-4">
-          <motion.div
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            className="relative"
-          >
-            <Upload className={cn(
-              "h-10 w-10 transition-colors",
-              isDragActive ? "text-primary" : "text-muted-foreground"
-            )} />
-          </motion.div>
-          <div className="text-center space-y-2">
-            <p className="text-sm font-medium">
-              {customText?.main || (
-                isValidating ? "Validating files..." :
-                files.length >= maxFiles ? "Maximum files reached" :
-                isDragActive ? "Drop files here..." :
-                "Drop PDF files here or click to browse"
-              )}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {customText?.details || (
-                files.length >= maxFiles
-                  ? "Remove files to add more"
-                  : `${files.length}/${maxFiles} files (${totalSizeMB}MB total)`
-              )}
-            </p>
-          </div>
-        </div>
-      </div>
+      <div {...rootProps}>
+        <motion.div
+          ref={ref}
+          initial={false}
+          animate={{ scale: 1 }}
+          whileHover={{ scale: 1 }}
+          className={cn(
+            "relative overflow-hidden rounded-xl border-2 group/upload p-[14px]",
+            isDragActive 
+              ? "border-primary bg-primary/5" 
+              : "border-muted/40",
+            "transition-all duration-300 ease-in-out",
+            isValidating && "opacity-50 cursor-wait"
+          )}
+        >
+          {/* Inner dotted border - Only show on hover */}
+          <div className={cn(
+            "absolute rounded-lg border-[2px] border-dashed",
+            "inset-[14px]",
+            isDragActive 
+              ? "border-primary opacity-100" 
+              : "border-blue-500/60 opacity-0 group-hover/upload:opacity-100",
+            "transition-all duration-300 pointer-events-none"
+          )} />
 
-      {!hideFileList && files.length > 0 && (
-        <AnimatePresence mode="popLayout">
-          <motion.div
-            layout
-            className="space-y-2"
-          >
-            {files.map((file, index) => (
+          {/* Content wrapper */}
+          <div className="relative px-7 py-9">
+            <input {...getInputProps()} />
+            
+            <div className="relative flex flex-col items-center justify-center gap-8">
+              {/* Icon with animation */}
               <motion.div
-                key={`${file.name}-${index}`}
-                layout
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className="flex items-center justify-between p-3 rounded-lg border bg-card"
+                initial={{ y: 0 }}
+                animate={{ 
+                  y: isDragActive ? -8 : 0,
+                  scale: isDragActive ? 1.1 : 1
+                }}
+                transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                className="relative"
               >
-                <div className="flex items-center gap-3 min-w-0">
-                  <File className="h-5 w-5 text-primary flex-shrink-0" />
-                  <span className="text-sm font-medium truncate">{file.name}</span>
-                  <span className="text-xs text-muted-foreground">
-                    ({(file.size / (1024 * 1024)).toFixed(1)} MB)
-                  </span>
-                </div>
-                <button
-                  onClick={() => removeFile(index)}
-                  className="rounded-full p-1 hover:bg-destructive/10 hover:text-destructive ml-2 flex-shrink-0 transition-colors"
-                  disabled={isValidating}
-                >
-                  <X className="h-4 w-4" />
-                </button>
+                <CloudUpload className={cn(
+                  "h-16 w-16 transition-all duration-300",
+                  isDragActive 
+                    ? "text-primary" 
+                    : "text-muted-foreground group-hover/upload:text-primary/80"
+                )} />
               </motion.div>
-            ))}
-          </motion.div>
-        </AnimatePresence>
-      )}
+
+              {/* Text content with animations */}
+              <motion.div 
+                className="text-center space-y-4"
+                animate={{
+                  y: isDragActive ? -4 : 0
+                }}
+                transition={{ type: "spring", stiffness: 400, damping: 25 }}
+              >
+                <AnimatePresence mode="wait">
+                  <motion.p
+                    key={isValidating ? 'validating' : isDragActive ? 'active' : 'idle'}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -10 }}
+                    className="text-lg font-medium bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent"
+                  >
+                    {customText?.main || (
+                      isValidating ? "Validating files..." :
+                      isDragActive ? "Drop to add files..." :
+                      "Drop PDF files here or click to browse"
+                    )}
+                  </motion.p>
+                </AnimatePresence>
+
+                <p className="text-sm text-muted-foreground">
+                  {customText?.details}
+                </p>
+
+                {/* File type indicators */}
+                <div className="flex items-center justify-center gap-2 pt-1">
+                  <div className="px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium">
+                    PDF Files
+                  </div>
+                  <div className="px-3 py-1 rounded-full bg-muted/50 text-muted-foreground text-xs">
+                    Max {maxFiles} files
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          </div>
+        </motion.div>
+      </div>
     </div>
   );
 } 
