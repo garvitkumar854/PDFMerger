@@ -78,7 +78,8 @@ export class WorkerPool extends EventEmitter {
     const now = Date.now();
     
     // Check for idle workers
-    for (const [worker, metrics] of this.workers.entries()) {
+    const workerEntries = Array.from(this.workers.entries());
+    for (const [worker, metrics] of workerEntries) {
       if (now - metrics.lastUsed > this.workerTimeout) {
         await this.terminateWorker(worker);
       }

@@ -1,9 +1,10 @@
+'use client';
+
 import { useState, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, FileIcon, CloudUpload } from 'lucide-react';
+import { Cloud, FileIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { validateFiles, clearProcessedFiles } from '@/lib/utils/file-validation';
 
 interface FileUploadProps {
   onFilesSelected: (files: File[]) => void;
@@ -17,6 +18,31 @@ interface FileUploadProps {
     details: string;
   };
 }
+
+// File validation function
+const validateFiles = async (files: File[]) => {
+  const validFiles: File[] = [];
+  const invalidFiles: { file: File; reason: string }[] = [];
+
+  for (const file of files) {
+    if (file.type !== 'application/pdf') {
+      invalidFiles.push({ file, reason: 'Not a PDF file' });
+      continue;
+    }
+    if (file.size > 10 * 1024 * 1024) { // 10MB limit
+      invalidFiles.push({ file, reason: 'File size exceeds 10MB' });
+      continue;
+    }
+    validFiles.push(file);
+  }
+
+  return {
+    valid: invalidFiles.length === 0,
+    validFiles,
+    invalidFiles,
+    error: invalidFiles.length > 0 ? new Error('Some files are invalid') : null
+  };
+};
 
 export function FileUpload({
   onFilesSelected,
@@ -36,7 +62,6 @@ export function FileUpload({
 
     try {
       setIsValidating(true);
-      clearProcessedFiles();
 
       const validationResult = await validateFiles(newFiles);
 
@@ -118,7 +143,7 @@ export function FileUpload({
                 transition={{ type: "spring", stiffness: 400, damping: 25 }}
                 className="relative"
               >
-                <CloudUpload className={cn(
+                <Cloud className={cn(
                   "h-16 w-16 transition-all duration-300",
                   isDragActive 
                     ? "text-primary" 

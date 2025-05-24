@@ -50,7 +50,8 @@ class PDFCache {
     const hash = createHash('sha256').update(data).digest('hex');
     
     // Check for duplicates with content-based deduplication
-    for (const [existingKey, value] of this.cache.entries()) {
+    const entries = Array.from(this.cache.entries());
+    for (const [existingKey, value] of entries) {
       const existingHash = createHash('sha256').update(value.data).digest('hex');
       if (existingHash === hash) {
         value.hits++;
