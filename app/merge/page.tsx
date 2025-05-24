@@ -1,21 +1,36 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { FileUpload } from "@/components/ui/file-upload";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { AlertCircle, FileText, X, Upload, CheckCircle2, Download, ArrowLeft, Shield, GripVertical, Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { FileText, X, Upload, CheckCircle2, Download, ArrowLeft, Shield, GripVertical, Plus } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import Link from "next/link";
-import { motion, AnimatePresence, Reorder, useDragControls } from "framer-motion";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { clearProcessedFiles } from "@/lib/utils/file-validation";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILES = 10;
 
 interface FileItem {
   id: string;
@@ -25,15 +40,70 @@ interface FileItem {
   content: ArrayBuffer | null;
 }
 
+interface SortableFileItemProps {
+  file: FileItem;
+  onRemove: (file: FileItem) => void;
+}
+
+const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({ id: file.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm hover:bg-primary/5 transition-colors"
+    >
+      <div className="flex items-center gap-3 flex-1 min-w-0" {...attributes} {...listeners}>
+        <GripVertical className="h-5 w-5 text-muted-foreground flex-shrink-0 cursor-grab" />
+        <div className="flex items-center gap-3 truncate flex-1 min-w-0">
+          <FileText className="h-5 w-5 text-primary flex-shrink-0" />
+          <span className="font-medium truncate">{file.name}</span>
+          <span className="text-sm text-muted-foreground">
+            ({(file.size / (1024 * 1024)).toFixed(1)} MB)
+          </span>
+        </div>
+      </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() => onRemove(file)}
+        className="h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2"
+      >
+        <X className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+};
+
 export default function MergePDF() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isMerging, setIsMerging] = useState(false);
   const [mergeProgress, setMergeProgress] = useState(0);
   const [isComplete, setIsComplete] = useState(false);
   const [mergedPdfUrl, setMergedPdfUrl] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
   const { isLoaded, userId } = useAuth();
   const router = useRouter();
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   // Protect the route
   useEffect(() => {
@@ -42,62 +112,170 @@ export default function MergePDF() {
     }
   }, [isLoaded, userId, router]);
 
-  const handleFilesSelected = useCallback(async (newFiles: File[]) => {
+  // Cleanup on unmount
+  useEffect(() => {
+    let progressInterval: NodeJS.Timeout | undefined;
+
+    return () => {
+      if (mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      if (progressInterval) {
+        clearInterval(progressInterval);
+      }
+      clearProcessedFiles();
+    };
+  }, [mergedPdfUrl]);
+
+  const handleFilesSelected = useCallback(async (selectedFiles: File[]) => {
     try {
-      // Check for duplicates
-      const existingFileNames = new Set(files.map(f => f.name));
-      const uniqueNewFiles = newFiles.filter(file => !existingFileNames.has(file.name));
-      
-      if (uniqueNewFiles.length < newFiles.length) {
-        toast({
-          title: "Duplicate files removed",
-          description: "Some files were already added and have been skipped.",
-          variant: "default",
-        });
-      }
-
-      // Calculate total size including existing files
-      const totalSize = [...files, ...uniqueNewFiles].reduce((sum, file) => sum + file.size, 0);
-      if (totalSize > MAX_TOTAL_SIZE) {
-        toast({
-          title: "Total size too large",
-          description: "Total file size exceeds 100MB limit",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      // Process new files
-      const newFileItems = await Promise.all(
-        uniqueNewFiles.map(async (file) => {
+      // Process each file to get content
+      const newFiles: FileItem[] = await Promise.all(
+        selectedFiles.map(async (file) => {
           const content = await file.arrayBuffer();
           return {
             id: `${file.name}-${Date.now()}-${Math.random()}`,
             name: file.name,
             size: file.size,
             type: file.type,
-            content
+            content: content
           };
         })
       );
 
-      setFiles(prev => [...prev, ...newFileItems]);
+      setFiles(newFiles);
+
+      // Reset merge states when files change
+      if (mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+        setMergedPdfUrl(null);
+      }
+      setIsComplete(false);
+      setMergeProgress(0);
+      setIsMerging(false);
+
+      // Show success message
+      toast({
+        title: "Files Added",
+        description: `Successfully added ${newFiles.length} file${newFiles.length === 1 ? '' : 's'}`,
+        variant: "default",
+      });
     } catch (error) {
       console.error('Error processing files:', error);
       toast({
         title: "Error",
-        description: "Failed to process files. Please try again.",
+        description: error instanceof Error ? error.message : "Failed to process files",
         variant: "destructive",
       });
     }
-  }, [files, toast]);
-
-  const handleReorder = useCallback((reorderedFiles: FileItem[]) => {
-    setFiles(reorderedFiles);
-  }, []);
+  }, [mergedPdfUrl, toast]);
 
   const handleRemoveFile = useCallback((fileToRemove: FileItem) => {
-    setFiles(prev => prev.filter(file => file.id !== fileToRemove.id));
+    // Clean up file resources
+    if (fileToRemove.content) {
+      fileToRemove.content = null;
+    }
+
+    // Clear processed files
+    clearProcessedFiles();
+
+    // Update files state
+    setFiles(prevFiles => {
+      const newFiles = prevFiles.filter(file => file.id !== fileToRemove.id);
+      
+      // Reset state if no files remain
+      if (newFiles.length === 0) {
+        if (mergedPdfUrl) {
+          URL.revokeObjectURL(mergedPdfUrl);
+          setMergedPdfUrl(null);
+        }
+        setIsComplete(false);
+        setMergeProgress(0);
+        setIsMerging(false);
+      }
+      
+      return newFiles;
+    });
+
+    // Trigger FileUpload component reset
+    window.dispatchEvent(new Event('reset-file-upload'));
+
+    // Show removal notification
+    setTimeout(() => {
+      toast({
+        title: "File Removed",
+        description: `${fileToRemove.name} has been removed`,
+        variant: "default",
+      });
+    }, 0);
+
+    // Abort any ongoing operations
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  }, [mergedPdfUrl, toast]);
+
+  const handleClearAll = useCallback(() => {
+    const fileCount = files.length;
+    if (fileCount === 0) return;
+
+    // Clean up files and clear processed files list
+    setFiles([]);
+    clearProcessedFiles();
+
+    // Trigger FileUpload component reset
+    window.dispatchEvent(new Event('reset-file-upload'));
+
+    // Clean up other states
+    if (mergedPdfUrl) {
+      URL.revokeObjectURL(mergedPdfUrl);
+      setMergedPdfUrl(null);
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    
+    setIsMerging(false);
+    setMergeProgress(0);
+    setIsComplete(false);
+
+    // Show clear notification
+    setTimeout(() => {
+      toast({
+        title: "Files Cleared",
+        description: `Removed ${fileCount} file${fileCount === 1 ? '' : 's'}`,
+        variant: "default",
+      });
+    }, 0);
+  }, [files.length, mergedPdfUrl, toast]);
+
+  // Calculate remaining capacity
+  const getRemainingCapacity = useCallback(() => {
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    const remainingSize = MAX_TOTAL_SIZE - totalSize;
+    return {
+      totalSize,
+      remainingSize,
+      totalFiles: files.length,
+      remainingFiles: MAX_FILES - files.length
+    };
+  }, [files]);
+
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
+    const { active, over } = event;
+    
+    if (over && active.id !== over.id) {
+      setFiles((items) => {
+        const oldIndex = items.findIndex((item) => item.id === active.id);
+        const newIndex = items.findIndex((item) => item.id === over.id);
+        return arrayMove(items, oldIndex, newIndex);
+      });
+    }
   }, []);
 
   const handleMerge = useCallback(async () => {
@@ -110,7 +288,19 @@ export default function MergePDF() {
       return;
     }
 
-    let progressInterval: NodeJS.Timeout;
+    // Cancel any existing merge operation
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    let progressInterval: NodeJS.Timeout | undefined;
+
+    const clearProgressInterval = () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = undefined;
+      }
+    };
 
     try {
       setIsMerging(true);
@@ -118,88 +308,115 @@ export default function MergePDF() {
       setIsComplete(false);
       setMergedPdfUrl(null);
 
-      // Calculate total size and determine processing tier
+      // Calculate total size
       const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-      const tier = {
-        tiny: totalSize <= 512 * 1024,        // 512KB
-        small: totalSize <= 2 * 1024 * 1024,  // 2MB
-        medium: totalSize <= 10 * 1024 * 1024, // 10MB
-        large: true                           // > 10MB
-      };
 
-      // Adaptive progress configuration
-      const progressConfig = {
-        interval: tier.tiny ? 50 : tier.small ? 100 : tier.medium ? 200 : 300,
-        maxProgress: tier.tiny ? 95 : tier.small ? 92 : tier.medium ? 88 : 85,
-        increments: {
-          initial: tier.tiny ? 5 : tier.small ? 2 : tier.medium ? 1 : 0.5,
-          middle: tier.tiny ? 2 : tier.small ? 1 : tier.medium ? 0.5 : 0.3,
-          final: tier.tiny ? 1 : tier.small ? 0.5 : tier.medium ? 0.3 : 0.1
-        }
-      };
-
-      // Adaptive progress tracking
-      progressInterval = setInterval(() => {
-        setMergeProgress(prev => {
-          const increment = prev < 30 ? progressConfig.increments.initial :
-                          prev < 60 ? progressConfig.increments.middle :
-                          progressConfig.increments.final;
-          return Math.min(prev + increment, progressConfig.maxProgress);
-        });
-      }, progressConfig.interval);
-
+      // Prepare form data
       const formData = new FormData();
-      files.forEach((fileItem: FileItem) => {
+
+      // Add files to form data with progress tracking
+      let processedSize = 0;
+      for (const fileItem of files) {
         if (!fileItem.content) {
           throw new Error(`Content not found for file ${fileItem.name}`);
         }
-        const file = new File([fileItem.content], fileItem.name, { type: fileItem.type });
-        formData.append("files", file);
+
+        try {
+          // Create a blob from the content
+          const blob = new Blob([fileItem.content], { type: 'application/pdf' });
+          
+          // Double-check the PDF structure
+          const firstBytes = await blob.slice(0, 1024).arrayBuffer();
+          const header = new Uint8Array(firstBytes);
+          
+          // Look for PDF signature
+          let hasPdfSignature = false;
+          for (let i = 0; i < header.length - 4; i++) {
+            if (header[i] === 0x25 && // %
+                header[i + 1] === 0x50 && // P
+                header[i + 2] === 0x44 && // D
+                header[i + 3] === 0x46 && // F
+                header[i + 4] === 0x2D) { // -
+              hasPdfSignature = true;
+              break;
+            }
+          }
+
+          if (!hasPdfSignature) {
+            throw new Error(`${fileItem.name} appears to be corrupted or is not a valid PDF`);
+          }
+
+          // Create a new file with the verified content
+          const file = new File([blob], fileItem.name, { 
+            type: 'application/pdf',
+            lastModified: Date.now()
+          });
+
+          formData.append("files", file);
+
+          // Update progress
+          processedSize += fileItem.size;
+          const progress = (processedSize / totalSize) * 30; // First 30% for file processing
+          setMergeProgress(Math.min(30, progress));
+        } catch (error) {
+          throw new Error(`Failed to process ${fileItem.name}: ${error instanceof Error ? error.message : 'Invalid PDF structure'}`);
+        }
+      }
+
+      abortControllerRef.current = new AbortController();
+
+      // Start progress tracking for merge operation
+      let mergeStartTime = Date.now();
+      progressInterval = setInterval(() => {
+        const elapsed = Date.now() - mergeStartTime;
+        const progress = Math.min(85, 30 + (elapsed / 1000) * 5); // Increase by 5% per second up to 85%
+        setMergeProgress(progress);
+      }, 100);
+
+      const response = await fetch("/api/merge", {
+        method: "POST",
+        body: formData,
+        signal: abortControllerRef.current.signal,
       });
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 180000);
+      clearProgressInterval();
 
-      try {
-        const response = await fetch("/api/merge", {
-          method: "POST",
-          body: formData,
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-        clearInterval(progressInterval);
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || "Failed to merge PDFs");
-        }
-
-        const blob = await response.blob();
-        
-        if (blob.size === 0) {
-          throw new Error("Generated PDF is empty");
-        }
-
-        const url = window.URL.createObjectURL(blob);
-        setMergedPdfUrl(url);
-        setMergeProgress(100);
-        
-        // Adaptive completion delay
-        await new Promise(resolve => setTimeout(resolve, tier.tiny ? 100 : tier.small ? 200 : 500));
-        setIsComplete(true);
-
-        toast({
-          title: "Success!",
-          description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
-          variant: "default"
-        });
-
-      } catch (error) {
-        clearTimeout(timeoutId);
-        if (progressInterval) clearInterval(progressInterval);
-        throw error;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Failed to merge PDFs' }));
+        throw new Error(errorData.error || "Failed to merge PDFs");
       }
+
+      const blob = await response.blob();
+      
+      if (blob.size === 0) {
+        throw new Error("Generated PDF is empty");
+      }
+
+      // Verify merged PDF header
+      const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+      if (!(header[0] === 0x25 && // %
+            header[1] === 0x50 && // P
+            header[2] === 0x44 && // D
+            header[3] === 0x46 && // F
+            header[4] === 0x2D)) { // -
+        throw new Error("Generated PDF appears to be corrupted");
+      }
+
+      // Clean up old URL if it exists
+      if (mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+      }
+
+      const url = URL.createObjectURL(blob);
+      setMergedPdfUrl(url);
+      setMergeProgress(100);
+      setIsComplete(true);
+
+      toast({
+        title: "Success!",
+        description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
+        variant: "default"
+      });
 
     } catch (error) {
       console.error("Error merging PDFs:", error);
@@ -207,9 +424,10 @@ export default function MergePDF() {
       
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "The operation took too long. Please try with fewer or smaller files.";
+          errorMessage = "The operation was cancelled. Please try with fewer or smaller files.";
         } else {
-          errorMessage = error.message;
+          // Clean up the error message
+          errorMessage = error.message.replace(/Error: /g, '').replace(/\[object \w+\]/g, 'PDF');
         }
       }
 
@@ -223,28 +441,16 @@ export default function MergePDF() {
       if (!isComplete) {
         setMergeProgress(0);
       }
-    }
-  }, [files, isComplete, toast]);
+      clearProgressInterval();
+      abortControllerRef.current = null;
 
-  const resetState = useCallback(() => {
-    if (mergedPdfUrl) {
-      window.URL.revokeObjectURL(mergedPdfUrl);
-    }
-    setFiles([]);
-    setIsMerging(false);
-    setMergeProgress(0);
-    setIsComplete(false);
-    setMergedPdfUrl(null);
-  }, [mergedPdfUrl]);
-
-  // Cleanup URLs on unmount
-  useEffect(() => {
-    return () => {
-      if (mergedPdfUrl) {
-        window.URL.revokeObjectURL(mergedPdfUrl);
+      // Clean up any temporary blobs
+      if (!isComplete && mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+        setMergedPdfUrl(null);
       }
-    };
-  }, [mergedPdfUrl]);
+    }
+  }, [files, isComplete, mergedPdfUrl, toast]);
 
   const handleDownload = useCallback(() => {
     if (!mergedPdfUrl) return;
@@ -285,153 +491,139 @@ export default function MergePDF() {
           </h1>
         </div>
 
-        <AnimatePresence mode="wait">
-          {!isComplete ? (
-            <motion.div
-              key="upload-section"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="space-y-4 sm:space-y-6"
-            >
-              <div className="p-1 rounded-xl bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20">
-                <FileUpload
-                  onFilesSelected={handleFilesSelected}
-                  maxFiles={10}
-                  acceptedFileTypes={["application/pdf"]}
-                  className="bg-card shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[300px] flex items-center justify-center p-4 sm:p-6"
-                  hideFileList
-                />
-              </div>
+        {!isComplete ? (
+          <div className="space-y-4 sm:space-y-6">
+            <div className="p-1 rounded-xl bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20">
+              <FileUpload
+                onFilesSelected={handleFilesSelected}
+                maxFiles={MAX_FILES}
+                acceptedFileTypes={["application/pdf"]}
+                className="bg-card shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[300px]"
+                hideFileList={true}
+                onError={(error) => {
+                  toast({
+                    title: "Error",
+                    description: error,
+                    variant: "destructive",
+                  });
+                }}
+                customText={{
+                  main: files.length === 0 
+                    ? "Drop your PDF files here or click to browse" 
+                    : "Drop more PDF files here or click to browse",
+                  details: (() => {
+                    const { totalSize, remainingSize, totalFiles, remainingFiles } = getRemainingCapacity();
+                    if (totalFiles === 0) {
+                      return `Upload up to ${MAX_FILES} PDF files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB total)`;
+                    }
+                    return `${totalFiles}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used, ${(remainingSize / (1024 * 1024)).toFixed(1)}MB remaining)`;
+                  })()
+                }}
+              />
+            </div>
 
-              {files.length > 0 && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="space-y-4 bg-card p-4 sm:p-6 rounded-xl shadow-lg border border-primary/20"
-                >
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4">
-                    <div className="space-y-1 w-full sm:w-auto">
-                      <h2 className="text-lg font-semibold text-foreground">Selected Files</h2>
-                      <p className="text-sm text-muted-foreground">Drag files to reorder them</p>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setFiles([])}
-                      className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto"
-                    >
-                      Clear All
-                    </Button>
+            {files.length > 0 ? (
+              <div className="space-y-4 bg-card p-4 sm:p-6 rounded-xl shadow-lg border border-primary/20">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4">
+                  <div className="space-y-1 w-full sm:w-auto">
+                    <h2 className="text-lg font-semibold text-foreground">Selected Files</h2>
+                    <p className="text-sm text-muted-foreground">
+                      {files.length} file{files.length !== 1 ? 's' : ''} selected ({(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)
+                    </p>
                   </div>
-
-                  <Reorder.Group
-                    axis="y"
-                    values={files}
-                    onReorder={handleReorder}
-                    className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar"
-                  >
-                    {files.map((file) => (
-                      <Reorder.Item
-                        key={file.id}
-                        value={file}
-                        dragListener={true}
-                        dragConstraints={{ top: 0, bottom: 0 }}
-                        className="flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm hover:bg-primary/5 transition-colors cursor-grab active:cursor-grabbing"
-                      >
-                        <div className="flex items-center gap-3 flex-1 min-w-0">
-                          <GripVertical className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                          <div className="flex items-center gap-3 truncate flex-1 min-w-0">
-                            <FileText className="h-5 w-5 text-primary flex-shrink-0" />
-                            <span className="font-medium truncate">{file.name}</span>
-                          </div>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleRemoveFile(file)}
-                          className="h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2"
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </Reorder.Item>
-                    ))}
-                  </Reorder.Group>
-
                   <Button
-                    onClick={handleMerge}
-                    disabled={isMerging || files.length < 2}
-                    className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-6 text-base sm:text-lg"
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleClearAll}
+                    className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto"
                   >
-                    {isMerging ? (
-                      <>
-                        <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
-                        Merging...
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
-                        Merge PDFs ({files.length} files)
-                      </>
-                    )}
+                    Clear All
                   </Button>
+                </div>
 
-                  {isMerging && (
-                    <div className="space-y-2">
-                      <Progress value={mergeProgress} className="h-2 sm:h-3" />
-                      <p className="text-sm sm:text-base text-muted-foreground text-center">
-                        Processing... {Math.round(mergeProgress)}%
-                      </p>
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                >
+                  <SortableContext
+                    items={files}
+                    strategy={verticalListSortingStrategy}
+                  >
+                    <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                      {files.map((file) => (
+                        <SortableFileItem
+                          key={file.id}
+                          file={file}
+                          onRemove={handleRemoveFile}
+                        />
+                      ))}
                     </div>
+                  </SortableContext>
+                </DndContext>
+
+                <Button
+                  onClick={handleMerge}
+                  disabled={isMerging || files.length < 2}
+                  className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-6 text-base sm:text-lg"
+                >
+                  {isMerging ? (
+                    <>
+                      <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+                      Merging...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
+                      Merge PDFs ({files.length} files)
+                    </>
                   )}
-                </motion.div>
-              )}
-            </motion.div>
-          ) : (
-            <motion.div
-              key="success-section"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-card p-6 sm:p-8 rounded-xl shadow-lg border border-primary/20 text-center"
-            >
-              <motion.div
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                className="rounded-full bg-primary/10 p-4 w-fit mx-auto mb-6"
-              >
-                <CheckCircle2 className="h-8 w-8 sm:h-10 sm:w-10 text-primary" />
-              </motion.div>
-              
-              <h2 className="text-xl sm:text-2xl font-semibold text-foreground mb-3">PDF Merged Successfully!</h2>
-              <p className="text-muted-foreground mb-6 sm:mb-8">
-                Your files have been combined into a single PDF
-              </p>
-              
-              <div className="flex flex-col gap-3 sm:gap-4">
-                <Button
-                  onClick={handleDownload}
-                  size="lg"
-                  className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-6 text-base sm:text-lg"
-                >
-                  <Download className="h-4 w-4 sm:h-5 sm:w-5" />
-                  Download PDF
                 </Button>
-                
-                <Button
-                  onClick={resetState}
-                  variant="outline"
-                  size="lg"
-                  className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-6 text-base sm:text-lg"
-                >
-                  <Plus className="h-4 w-4 sm:h-5 sm:w-5" />
-                  Merge More PDFs
-                </Button>
+
+                {isMerging && (
+                  <div className="space-y-2">
+                    <Progress value={mergeProgress} className="h-2 sm:h-3" />
+                    <p className="text-sm sm:text-base text-muted-foreground text-center">
+                      Processing... {Math.round(mergeProgress)}%
+                    </p>
+                  </div>
+                )}
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            ) : null}
+          </div>
+        ) : (
+          <div className="bg-card p-6 sm:p-8 rounded-xl shadow-lg border border-primary/20 text-center">
+            <div className="rounded-full bg-primary/10 p-4 w-fit mx-auto mb-6">
+              <CheckCircle2 className="h-8 w-8 sm:h-10 sm:w-10 text-primary" />
+            </div>
+            
+            <h2 className="text-xl sm:text-2xl font-semibold text-foreground mb-3">PDF Merged Successfully!</h2>
+            <p className="text-muted-foreground mb-6 sm:mb-8">
+              Your files have been combined into a single PDF
+            </p>
+            
+            <div className="flex flex-col gap-3 sm:gap-4">
+              <Button
+                onClick={handleDownload}
+                size="lg"
+                className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-6 text-base sm:text-lg"
+              >
+                <Download className="h-4 w-4 sm:h-5 sm:w-5" />
+                Download PDF
+              </Button>
+              
+              <Button
+                onClick={handleClearAll}
+                variant="outline"
+                size="lg"
+                className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-6 text-base sm:text-lg"
+              >
+                <Plus className="h-4 w-4 sm:h-5 sm:w-5" />
+                Merge More PDFs
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
