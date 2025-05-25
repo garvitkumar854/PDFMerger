@@ -38,11 +38,10 @@ import { css } from "@emotion/react";
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per file
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
 const MAX_FILES = 20;
-const MAX_RETRIES = 5;
-const RETRY_DELAY = 1000; // 1 second initial retry delay
-const UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks for upload
-const PARALLEL_UPLOADS = 3; // Number of parallel uploads
 const RETRY_ATTEMPTS = 3;
+const RETRY_DELAY = 1000; // 1 second
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better performance
+const PARALLEL_UPLOADS = 3;
 const NETWORK_ERRORS = [
   'failed to fetch',
   'network',
@@ -65,7 +64,6 @@ interface FileItem {
   size: number;
   type: string;
   file: File;
-  arrayBuffer: () => Promise<ArrayBuffer>;
 }
 
 interface SortableFileItemProps {
@@ -185,7 +183,7 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   } = useSortable({ 
     id: file.id,
     transition: {
-      duration: 200,
+      duration: 150,
       easing: "ease"
     }
   });
@@ -193,13 +191,6 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-    position: 'relative' as const,
-    touchAction: 'manipulation',
-    willChange: 'transform',
-    userSelect: 'none' as const,
-    WebkitUserSelect: 'none' as const,
-    WebkitTouchCallout: 'none' as const,
-    WebkitTapHighlightColor: 'transparent',
     zIndex: isDragging ? 999 : 1,
   };
 
@@ -214,17 +205,14 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
       layoutId={file.id}
       className={cn(
         "flex items-center justify-between p-3 rounded-lg border bg-background/50",
-        "touch-none select-none will-change-transform",
-        isDragging ? 
-          "border-primary shadow-lg bg-background z-50 !scale-105" : 
-          "hover:bg-primary/5 hover:border-primary/20",
+        "group hover:border-primary/20",
+        isDragging ? "border-primary shadow-lg bg-background z-50" : "hover:bg-primary/5",
         over ? "opacity-50 scale-95 transition-all duration-200" : ""
       )}
     >
       <div 
         className={cn(
           "flex items-center gap-3 flex-1 min-w-0",
-          "touch-none select-none",
           isDragging ? "cursor-grabbing" : "cursor-grab"
         )}
         {...attributes} 
@@ -234,7 +222,6 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
           whileHover={{ scale: 1.1 }}
           whileTap={{ scale: 0.95 }}
           transition={{ type: "spring", stiffness: 400, damping: 25 }}
-          className="touch-none select-none"
         >
           <GripVertical className={cn(
             "h-5 w-5 flex-shrink-0",
@@ -247,14 +234,6 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
               "h-5 w-5 flex-shrink-0",
               isDragging ? "text-primary" : "text-primary/80"
             )} />
-            {file.file && (
-              <motion.div 
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full"
-              />
-            )}
           </div>
           <span className={cn(
             "font-medium truncate",
@@ -271,7 +250,7 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
         onClick={() => onRemove(file)}
         className={cn(
           "h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2",
-          "sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200"
+          "opacity-0 group-hover:opacity-100 sm:opacity-100 transition-opacity duration-200"
         )}
       >
         <X className="h-4 w-4" />
@@ -280,16 +259,10 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   );
 };
 
-// Add optimized file processing
-const processFilesInParallel = async (
-  files: FileItem[],
-  setProgress: (state: ProgressState) => void
-): Promise<FormData> => {
-  setProgress({ phase: 'preparing', progress: 0, detail: 'Preparing files...' });
-
+// Optimized file processing function
+const processFiles = async (files: FileItem[]): Promise<FormData> => {
   const formData = new FormData();
   const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-  let processedSize = 0;
 
   // Process files in parallel batches
   const batchSize = Math.min(PARALLEL_UPLOADS, files.length);
@@ -297,56 +270,10 @@ const processFilesInParallel = async (
     const batch = files.slice(i, i + batchSize);
     await Promise.all(batch.map(async (fileItem) => {
       formData.append("files", fileItem.file);
-      processedSize += fileItem.file.size;
-      
-      setProgress({
-        phase: 'preparing',
-        progress: Math.floor((processedSize / totalSize) * 30),
-        detail: `Processing file ${i + 1}/${files.length}...`
-      });
     }));
   }
 
   return formData;
-};
-
-// Add optimized progress tracking
-const trackProgress = (
-  response: Response,
-  setProgress: (state: ProgressState) => void,
-  estimatedSize: number
-) => {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("Failed to get response reader");
-
-  return new ReadableStream({
-    async start(controller) {
-      let receivedLength = 0;
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          
-          if (done) {
-            controller.close();
-            break;
-          }
-
-          receivedLength += value.length;
-          controller.enqueue(value);
-
-          // Update download progress (60-90%)
-          setProgress({
-            phase: 'downloading',
-            progress: 60 + Math.floor((receivedLength / estimatedSize) * 30),
-            detail: `Downloading: ${Math.floor((receivedLength / estimatedSize) * 100)}%`
-          });
-        }
-      } catch (error) {
-        controller.error(error);
-      }
-    },
-  });
 };
 
 // Add device detection
@@ -445,14 +372,13 @@ export default function MergePDF() {
     };
   }, [mergedPdfUrl]);
 
-  // Update handleFileUpload with improved validation and error handling
-  const handleFileSelect = useCallback((files: File[]) => {
-    if (!files?.length) return;
+  const handleFileSelect = useCallback((uploadedFiles: File[]) => {
+    if (!uploadedFiles?.length) return;
 
     const newFiles: FileItem[] = [];
     const errors: string[] = [];
 
-    for (const file of files) {
+    for (const file of uploadedFiles) {
       if (!file.type.includes('pdf')) {
         errors.push(`${file.name} is not a PDF file`);
         continue;
@@ -468,8 +394,7 @@ export default function MergePDF() {
         name: file.name,
         size: file.size,
         type: file.type,
-        file: file,
-        arrayBuffer: () => file.arrayBuffer()
+        file: file
       });
     }
 
@@ -490,7 +415,7 @@ export default function MergePDF() {
   const handleRemoveFile = useCallback((fileToRemove: FileItem) => {
     setFiles(prevFiles => prevFiles.filter(f => f.id !== fileToRemove.id));
     
-    // Reset progress and completion state if all files are removed
+    // Reset states if no files remain
     if (files.length <= 1) {
       setMergeProgress(0);
       setIsComplete(false);
@@ -539,37 +464,14 @@ export default function MergePDF() {
     }
   }, []);
 
-  // Add retry logic for merge operation
   const handleMerge = useCallback(async (retryCount = 0) => {
     if (!files.length) return;
 
-    const deviceType = getDeviceType();
-    const totalSize = files.reduce((acc, file) => acc + file.size, 0);
-
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     if (totalSize > MAX_TOTAL_SIZE) {
       toast({
         title: "Error",
         description: `Total size exceeds ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB limit`,
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (files.length > MAX_FILES) {
-      toast({
-        title: "Error",
-        description: `Maximum ${MAX_FILES} files allowed`,
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Check individual file sizes
-    const oversizedFile = files.find(file => file.size > MAX_FILE_SIZE);
-    if (oversizedFile) {
-      toast({
-        title: "Error",
-        description: `File "${oversizedFile.name}" exceeds ${(MAX_FILE_SIZE / (1024 * 1024)).toFixed(0)}MB limit`,
         variant: "destructive",
       });
       return;
@@ -584,100 +486,28 @@ export default function MergePDF() {
       setMergedPdfUrl(null);
     }
 
-    let uploadController: AbortController | null = new AbortController();
-    let processingController: AbortController | null = new AbortController();
-    let uploadTimeout: NodeJS.Timeout | null = null;
-    let processingTimeout: NodeJS.Timeout | null = null;
-
-    const cleanup = () => {
-      if (uploadTimeout) clearTimeout(uploadTimeout);
-      if (processingTimeout) clearTimeout(processingTimeout);
-      if (uploadController) uploadController.abort();
-      if (processingController) processingController.abort();
-      uploadController = null;
-      processingController = null;
-      uploadTimeout = null;
-      processingTimeout = null;
-    };
-
     try {
-      // Process files in optimized chunks
-      const formData = new FormData();
-      let totalProcessed = 0;
-      
-      // Process files sequentially for better memory management
-      for (const file of files) {
-        const buffer = await file.arrayBuffer();
-        const optimizedChunkSize = calculateChunkSize(buffer.byteLength, deviceType);
-        const chunks = Math.ceil(buffer.byteLength / optimizedChunkSize);
-        
-        // Process chunks with memory management
-        for (let i = 0; i < chunks; i++) {
-          await checkMemoryUsage();
-          
-          const start = i * optimizedChunkSize;
-          const end = Math.min(start + optimizedChunkSize, buffer.byteLength);
-          const chunk = buffer.slice(start, end);
-          
-          const chunkBlob = new Blob([chunk], { type: 'application/pdf' });
-          formData.append('files', chunkBlob, `${file.name}.part${i}`);
-          
-          totalProcessed += chunk.byteLength;
-          setMergeProgress(Math.floor((totalProcessed / totalSize) * 30));
-          
-          // Free up memory
-          if (i % MAX_PARALLEL_CHUNKS === 0) {
-            await new Promise(resolve => setTimeout(resolve, 10));
-          }
-        }
-      }
-
-      // Add device info to headers
-      const headers = {
-        "X-Request-ID": Math.random().toString(36).substring(7),
-        "X-Retry-Count": retryCount.toString(),
-        "X-Total-Size": totalSize.toString(),
-        "X-File-Count": files.length.toString(),
-        "X-Device-Type": deviceType,
-        "X-Chunk-Size": calculateChunkSize(totalSize, deviceType).toString()
-      };
-
-      // Start merge request with separate timeouts for upload and processing
+      // Process files with progress tracking
+      const formData = await processFiles(files);
       setMergeProgress(30);
-      
-      // Set upload timeout
-      uploadTimeout = setTimeout(() => {
-        if (uploadController) {
-          uploadController.abort();
-          throw new Error('Upload timed out');
-        }
-      }, UPLOAD_TIMEOUT);
 
       const response = await fetch("/api/merge", {
         method: "POST",
         body: formData,
-        signal: uploadController.signal,
-        headers: headers
+        headers: {
+          "X-Request-ID": Math.random().toString(36).substring(7),
+          "X-Retry-Count": retryCount.toString(),
+          "X-Total-Size": totalSize.toString(),
+          "X-File-Count": files.length.toString()
+        }
       });
-
-      // Clear upload timeout and controller
-      if (uploadTimeout) clearTimeout(uploadTimeout);
-      uploadController = null;
 
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || "Failed to merge PDFs");
       }
 
-      // Set processing timeout
-      processingTimeout = setTimeout(() => {
-        if (processingController) {
-          processingController.abort();
-          throw new Error('Processing timed out');
-        }
-      }, PROCESSING_TIMEOUT);
-
-      // Optimize response handling for mobile
+      // Stream response with progress tracking
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Failed to get response reader");
 
@@ -686,7 +516,6 @@ export default function MergePDF() {
       const contentLength = parseInt(response.headers.get('Content-Length') || '0');
 
       while (true) {
-        await checkMemoryUsage();
         const { done, value } = await reader.read();
         
         if (done) break;
@@ -694,83 +523,45 @@ export default function MergePDF() {
         chunks.push(value);
         receivedLength += value.length;
         
-        // Update progress with smoother updates
-        setMergeProgress(60 + Math.floor((receivedLength / contentLength) * 30));
-        
-        // Free up memory periodically
-        if (chunks.length % MAX_PARALLEL_CHUNKS === 0) {
-          await new Promise(resolve => setTimeout(resolve, 10));
-        }
+        // Update progress smoothly
+        setMergeProgress(30 + Math.floor((receivedLength / contentLength) * 70));
       }
 
-      // Combine chunks and create blob
+      // Create blob and URL
       const blob = new Blob(chunks, { type: 'application/pdf' });
-      
-      if (blob.size === 0) {
-        throw new Error("Generated PDF is empty");
-      }
-
-      // Create URL and finish
       const url = URL.createObjectURL(blob);
       setMergedPdfUrl(url);
       setMergeProgress(100);
       setIsComplete(true);
 
-      const processingTime = response.headers.get('X-Processing-Time');
       toast({
         title: "Success!",
-        description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB) in ${processingTime}s`,
+        description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
         variant: "default",
       });
 
     } catch (error) {
       console.error("Error merging PDFs:", error);
-      
-      const errorMessage = error instanceof Error ? error.message.toLowerCase() : '';
-      const isTimeout = errorMessage.includes('timeout') || errorMessage.includes('aborted');
-      const isNetworkError = NETWORK_ERRORS.some(err => errorMessage.includes(err));
-      const isMemoryError = errorMessage.includes('memory') || errorMessage.includes('allocation failed');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      // Enhanced error handling
-      if ((isTimeout || isNetworkError || isMemoryError) && retryCount < MAX_RETRIES) {
-        const backoffDelay = RETRY_DELAY * Math.pow(2, retryCount);
-        
+      if (retryCount < RETRY_ATTEMPTS) {
         toast({
           title: "Retrying...",
-          description: `Attempt ${retryCount + 1} of ${MAX_RETRIES}. Please wait...`,
+          description: `Attempt ${retryCount + 1} of ${RETRY_ATTEMPTS}`,
           variant: "default",
         });
 
-        // Clear memory before retry
-        await checkMemoryUsage();
-        
-        // Exponential backoff with jitter
-        await new Promise(resolve => 
-          setTimeout(resolve, backoffDelay + Math.random() * 1000)
-        );
-        
-        cleanup();
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * Math.pow(2, retryCount)));
         return handleMerge(retryCount + 1);
-      }
-
-      let userErrorMessage = "Failed to merge PDFs. Please try again.";
-
-      if (isTimeout) {
-        userErrorMessage = "Operation timed out. Try with fewer or smaller files.";
-      } else if (errorMessage.includes('network')) {
-        userErrorMessage = "Network error occurred. Please check your connection.";
-      } else if (error instanceof Error) {
-        userErrorMessage = error.message;
       }
 
       toast({
         title: "Error",
-        description: userErrorMessage,
+        description: errorMessage,
         variant: "destructive",
         duration: 5000,
       });
 
-      // Reset states on error
       setIsComplete(false);
       setMergeProgress(0);
       if (mergedPdfUrl) {
@@ -778,9 +569,7 @@ export default function MergePDF() {
         setMergedPdfUrl(null);
       }
     } finally {
-      cleanup();
       setIsMerging(false);
-      await checkMemoryUsage();
     }
   }, [files, mergedPdfUrl, toast]);
 
@@ -931,15 +720,9 @@ export default function MergePDF() {
                             {files.length}
                           </span>
                         </h2>
-                        <div className="flex flex-col gap-0.5">
-                          <p className="text-xs text-muted-foreground">
-                            {(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total
-                          </p>
-                          <p className="text-xs flex items-center gap-1.5 text-muted-foreground">
-                            <GripVertical className="h-3 w-3" />
-                            Drag files to reorder them
-                          </p>
-                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total
+                        </p>
                       </div>
                       <Button
                         variant="ghost"
@@ -957,11 +740,6 @@ export default function MergePDF() {
                     collisionDetection={closestCenter}
                     onDragEnd={handleDragEnd}
                     modifiers={[restrictToVerticalAxis]}
-                    measuring={{
-                      droppable: {
-                        strategy: MeasuringStrategy.Always
-                      }
-                    }}
                   >
                     <SortableContext
                       items={files}
@@ -972,10 +750,6 @@ export default function MergePDF() {
                         initial="hidden"
                         animate="visible"
                         className="space-y-1.5 max-h-[calc(100vh-300px)] sm:max-h-[250px] overflow-y-auto overscroll-contain custom-scrollbar"
-                        style={{
-                          touchAction: 'pan-y',
-                          WebkitOverflowScrolling: 'touch',
-                        }}
                       >
                         <AnimatePresence mode="popLayout">
                           {files.map((file) => (
@@ -994,21 +768,13 @@ export default function MergePDF() {
                     <div className="space-y-2">
                       <Button
                         onClick={() => handleMerge(0)}
-                        disabled={isMerging || isOverLimit().isOverLimit}
-                        className={cn(
-                          "w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-3 sm:py-4 text-sm sm:text-base",
-                          isOverLimit().isOverLimit && "opacity-50 cursor-not-allowed"
-                        )}
+                        disabled={isMerging || files.length < 2}
+                        className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-3 sm:py-4 text-sm sm:text-base"
                       >
                         {isMerging ? (
                           <>
                             <div className="mr-2 h-4 w-4 animate-spin border-2 border-primary-foreground border-t-transparent rounded-full" />
-                            Merging...
-                          </>
-                        ) : isOverLimit().isOverLimit ? (
-                          <>
-                            <AlertCircle className="mr-2 h-4 w-4" />
-                            {isOverLimit().reason}
+                            Merging... {mergeProgress}%
                           </>
                         ) : (
                           <>

@@ -19,6 +19,17 @@ const nextConfig = {
       'framer-motion',
       'pdf-lib'
     ],
+    serverActions: {
+      bodySizeLimit: '200mb',
+    },
+  },
+  serverRuntimeConfig: {
+    // Will only be available on the server side
+    maxDuration: 300, // 5 minutes in seconds
+  },
+  publicRuntimeConfig: {
+    // Will be available on both server and client
+    maxUploadSize: '200mb',
   },
   webpack: (config, { dev, isServer }) => {
     // Optimize PDF processing in production
@@ -50,6 +61,18 @@ const nextConfig = {
         },
       };
     }
+
+    // Add necessary externals
+    config.externals = [...(config.externals || []), 'canvas', 'jsdom'];
+
+    // Optimize for large file uploads
+    if (isServer) {
+      config.experiments = {
+        ...config.experiments,
+        topLevelAwait: true,
+      };
+    }
+
     return config;
   },
 };

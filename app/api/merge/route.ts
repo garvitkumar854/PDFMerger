@@ -11,6 +11,11 @@ const MIN_CHUNK_SIZE = 512 * 1024; // 512KB
 const MAX_PAGES_PER_BATCH = 5; // Process 5 pages at a time
 const PAGE_PROCESSING_DELAY = 50; // 50ms delay between page batches
 
+// Route configuration
+export const runtime = 'nodejs';
+export const preferredRegion = ['fra1'];
+export const maxDuration = 300;
+
 // Helper function to get optimal chunk size based on available memory
 const getOptimalChunkSize = (totalSize: number, deviceType: string) => {
   const availableMemory = process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE 
@@ -232,11 +237,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-// Route segment configuration
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
-// Set maximum duration based on deployment environment
-export const maxDuration = process.env.VERCEL_ENV === 'production' ? 60 : 300; 
+} 
