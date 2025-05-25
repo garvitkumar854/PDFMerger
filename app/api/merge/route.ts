@@ -5,7 +5,7 @@ import { createHash } from "crypto";
 // Constants for file handling
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per file
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
-const MAX_PROCESSING_TIME = 300000; // 5 minutes for large files
+const MAX_PROCESSING_TIME = 55000; // 55 seconds to allow for cleanup
 const MAX_FILES = 20; // Maximum number of files
 
 // Initialize PDF service
@@ -145,4 +145,4 @@ async function processRequest(request: NextRequest, requestId: string): Promise<
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 300; // 5 minutes for large files 
+export const maxDuration = 60; // Maximum allowed duration for hobby plan 
