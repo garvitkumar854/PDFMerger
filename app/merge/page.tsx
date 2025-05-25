@@ -17,7 +17,9 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
-  DragEndEvent
+  DragEndEvent,
+  TouchSensor,
+  MeasuringStrategy
 } from "@dnd-kit/core";
 import {
   arrayMove,
@@ -29,6 +31,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB
@@ -47,28 +50,65 @@ interface SortableFileItemProps {
   onRemove: (file: FileItem) => void;
 }
 
-// Add animation variants
+// Animation variants
+const itemVariants = {
+  hidden: { 
+    opacity: 0, 
+    y: 10,
+  },
+  visible: { 
+    opacity: 1, 
+    y: 0,
+    transition: {
+      type: "spring",
+      stiffness: 200,
+      damping: 20
+    }
+  }
+};
+
+// Optimize animation variants for better performance
+const sortableItemVariants = {
+  hidden: { 
+    opacity: 0, 
+    y: 10,
+  },
+  visible: { 
+    opacity: 1, 
+    y: 0,
+    transition: {
+      type: "spring",
+      stiffness: 200,
+      damping: 20
+    }
+  },
+  dragging: { 
+    scale: 1.05,
+    y: -10,
+    zIndex: 3,
+    transition: {
+      type: "spring",
+      stiffness: 300,
+      damping: 30,
+      mass: 1
+    }
+  },
+  exit: {
+    opacity: 0,
+    scale: 0.98,
+    transition: {
+      duration: 0.15
+    }
+  }
+};
+
+// Optimize the container animations
 const containerVariants = {
   hidden: { opacity: 0 },
   visible: { 
     opacity: 1,
     transition: {
-      duration: 0.2,
-      ease: "easeOut",
-      when: "beforeChildren",
-      staggerChildren: 0.1
-    }
-  }
-};
-
-const itemVariants = {
-  hidden: { opacity: 0, y: 20 },
-  visible: { 
-    opacity: 1, 
-    y: 0,
-    transition: {
-      duration: 0.2,
-      ease: "easeOut"
+      staggerChildren: 0.05
     }
   }
 };
@@ -81,16 +121,7 @@ const SPRING_ANIMATION = {
   mass: 0.5
 };
 
-const sortableItemVariants = {
-  hidden: { opacity: 0, y: 20 },
-  visible: { opacity: 1, y: 0 },
-  dragging: { 
-    scale: 1.02,
-    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.12)",
-    cursor: "grabbing"
-  }
-};
-
+// Update SortableFileItem component for better touch handling
 const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   const {
     attributes,
@@ -98,14 +129,26 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
     setNodeRef,
     transform,
     transition,
-    isDragging
-  } = useSortable({ id: file.id });
+    isDragging,
+    over
+  } = useSortable({ 
+    id: file.id,
+    transition: {
+      duration: 200,
+      easing: "ease"
+    }
+  });
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-    zIndex: isDragging ? 2 : 1,
-    position: 'relative' as const
+    position: 'relative' as const,
+    touchAction: 'none',
+    willChange: 'transform',
+    userSelect: 'none' as const,
+    WebkitUserSelect: 'none' as const,
+    WebkitTapHighlightColor: 'transparent',
+    WebkitTouchCallout: 'none' as const
   };
 
   return (
@@ -115,25 +158,36 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
       variants={sortableItemVariants}
       initial="hidden"
       animate={isDragging ? "dragging" : "visible"}
-      exit={{ opacity: 0, scale: 0.95 }}
-      transition={SPRING_ANIMATION}
+      exit="exit"
+      layoutId={file.id}
       className={cn(
-        "flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm group",
-        "hover:bg-primary/5 hover:border-primary/20",
-        "transition-all duration-200 ease-out transform-gpu",
-        isDragging && "border-primary/30"
+        "flex items-center justify-between p-3 rounded-lg border",
+        "touch-none select-none will-change-transform",
+        "active:cursor-grabbing",
+        isDragging ? 
+          "border-primary shadow-lg bg-background z-10" : 
+          "hover:bg-primary/5 hover:border-primary/20",
+        over ? "opacity-60 scale-[0.98] transition-all duration-200" : ""
       )}
     >
-      <div className="flex items-center gap-3 flex-1 min-w-0" {...attributes} {...listeners}>
+      <div 
+        className={cn(
+          "flex items-center gap-3 flex-1 min-w-0",
+          "cursor-grab active:cursor-grabbing",
+          "touch-pan-y"
+        )}
+        {...attributes} 
+        {...listeners}
+      >
         <motion.div 
           whileHover={{ scale: 1.1 }}
-          transition={SPRING_ANIMATION}
-          className="cursor-grab active:cursor-grabbing"
+          whileTap={{ scale: 0.95 }}
+          transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          className="touch-none select-none"
         >
           <GripVertical className={cn(
-            "h-5 w-5 text-muted-foreground flex-shrink-0",
-            "opacity-0 group-hover:opacity-100 transition-opacity duration-200",
-            isDragging && "opacity-100"
+            "h-5 w-5 flex-shrink-0",
+            isDragging ? "text-primary" : "text-muted-foreground"
           )} />
         </motion.div>
         <div className="flex items-center gap-3 truncate flex-1 min-w-0">
@@ -146,11 +200,15 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
               <motion.div 
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
+                transition={{ type: "spring", stiffness: 400, damping: 25 }}
                 className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full"
               />
             )}
           </div>
-          <span className="font-medium truncate">{file.name}</span>
+          <span className={cn(
+            "font-medium truncate",
+            isDragging && "text-primary"
+          )}>{file.name}</span>
           <span className="text-sm text-muted-foreground whitespace-nowrap">
             ({(file.size / (1024 * 1024)).toFixed(1)} MB)
           </span>
@@ -162,7 +220,7 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
         onClick={() => onRemove(file)}
         className={cn(
           "h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2",
-          "opacity-0 group-hover:opacity-100 transition-all duration-200 ease-out"
+          "sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-200"
         )}
       >
         <X className="h-4 w-4" />
@@ -171,55 +229,176 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   );
 };
 
-// Add efficient file processing utilities
-const processFileInChunks = async (file: File, chunkSize = 64 * 1024): Promise<ArrayBuffer> => {
-  return new Promise((resolve, reject) => {
-    const fileReader = new FileReader();
-    const chunks: ArrayBuffer[] = [];
-    let offset = 0;
+// Add optimized chunk processing with web workers
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+const CONCURRENT_CHUNKS = 3;
 
-    const readNextChunk = () => {
-      const slice = file.slice(offset, offset + chunkSize);
-      fileReader.readAsArrayBuffer(slice);
-    };
-
-    fileReader.onload = (e) => {
-      if (e.target?.result) {
-        chunks.push(e.target.result as ArrayBuffer);
-        offset += chunkSize;
-        if (offset < file.size) {
-          readNextChunk();
-        } else {
-          // Combine all chunks
-          const completeBuffer = new ArrayBuffer(file.size);
-          const view = new Uint8Array(completeBuffer);
-          let position = 0;
-          chunks.forEach(chunk => {
-            view.set(new Uint8Array(chunk), position);
-            position += chunk.byteLength;
-          });
-          resolve(completeBuffer);
-        }
+// Add web worker for PDF processing
+const createPDFWorker = () => {
+  const workerCode = `
+    self.onmessage = async (e) => {
+      const { chunk, index } = e.data;
+      try {
+        // Process chunk
+        const processedChunk = new Uint8Array(chunk);
+        self.postMessage({ success: true, index, chunk: processedChunk });
+      } catch (error) {
+        self.postMessage({ success: false, index, error: error.message });
       }
     };
+  `;
 
-    fileReader.onerror = () => reject(fileReader.error);
-    readNextChunk();
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  return new Worker(URL.createObjectURL(blob));
+};
+
+// Add optimized file processing
+const processFileInChunks = async (file: File): Promise<ArrayBuffer> => {
+  return new Promise((resolve, reject) => {
+    const chunks: ArrayBuffer[] = [];
+    let processedChunks = 0;
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const workers: Worker[] = [];
+    
+    const cleanup = () => {
+      workers.forEach(worker => worker.terminate());
+      URL.revokeObjectURL(file.name);
+    };
+
+    try {
+      // Create worker pool
+      for (let i = 0; i < CONCURRENT_CHUNKS; i++) {
+        const worker = createPDFWorker();
+        worker.onerror = (error) => {
+          cleanup();
+          reject(error);
+        };
+        workers.push(worker);
+      }
+
+      // Process chunks with workers
+      let currentChunk = 0;
+      const processNextChunk = () => {
+        if (currentChunk >= totalChunks) return;
+
+        const start = currentChunk * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+
+        const worker = workers[currentChunk % workers.length];
+        worker.onmessage = (e) => {
+          const { success, index, chunk: processedChunk, error } = e.data;
+          
+          if (!success) {
+            cleanup();
+            reject(new Error(error));
+            return;
+          }
+
+          chunks[index] = processedChunk;
+          processedChunks++;
+
+          if (processedChunks === totalChunks) {
+            cleanup();
+            resolve(concatenateChunks(chunks));
+          } else {
+            processNextChunk();
+          }
+        };
+
+        worker.postMessage({ chunk, index: currentChunk });
+        currentChunk++;
+      };
+
+      // Start initial chunk processing
+      for (let i = 0; i < Math.min(CONCURRENT_CHUNKS, totalChunks); i++) {
+        processNextChunk();
+      }
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
   });
 };
 
-// Optimized PDF validation
-const validatePdfHeader = (buffer: ArrayBuffer): boolean => {
-  const header = new Uint8Array(buffer.slice(0, 5));
-  return header[0] === 0x25 && // %
-         header[1] === 0x50 && // P
-         header[2] === 0x44 && // D
-         header[3] === 0x46 && // F
-         header[4] === 0x2D;   // -
+// Optimize chunk concatenation
+const concatenateChunks = (chunks: ArrayBuffer[]): ArrayBuffer => {
+  const totalSize = chunks.reduce((size, chunk) => size + chunk.byteLength, 0);
+  const result = new Uint8Array(totalSize);
+  let offset = 0;
+
+  chunks.forEach(chunk => {
+    result.set(new Uint8Array(chunk), offset);
+    offset += chunk.byteLength;
+  });
+
+  return result.buffer;
+};
+
+// Add optimized file validation
+const validatePDFHeader = async (file: File): Promise<boolean> => {
+  const header = await file.slice(0, 5).arrayBuffer();
+  const view = new Uint8Array(header);
+  return view[0] === 0x25 && // %
+         view[1] === 0x50 && // P
+         view[2] === 0x44 && // D
+         view[3] === 0x46 && // F
+         view[4] === 0x2D;   // -
 };
 
 // Cache for validated files
 const validatedFiles = new WeakMap<File, boolean>();
+
+// Add helper function for file validation
+const validateFile = async (file: File): Promise<{ isValid: boolean; error?: string }> => {
+  try {
+    // 1. Basic file checks
+    if (!file) {
+      return { isValid: false, error: 'Invalid file object' };
+    }
+
+    if (file.size === 0) {
+      return { isValid: false, error: 'File is empty' };
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      return { 
+        isValid: false, 
+        error: `File size (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds limit of ${MAX_FILE_SIZE / (1024 * 1024)}MB` 
+      };
+    }
+
+    // 2. File type validation
+    const isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (!isPDF) {
+      return { isValid: false, error: 'Only PDF files are allowed' };
+    }
+
+    // 3. Try to read the first few bytes to verify it's a valid PDF
+    try {
+      const header = await file.slice(0, 5).arrayBuffer();
+      const view = new Uint8Array(header);
+      const isPDFHeader = view[0] === 0x25 && // %
+                         view[1] === 0x50 && // P
+                         view[2] === 0x44 && // D
+                         view[3] === 0x46 && // F
+                         view[4] === 0x2D;   // -
+      
+      if (!isPDFHeader) {
+        return { isValid: false, error: 'Invalid PDF format: Missing PDF signature' };
+      }
+    } catch (error) {
+      return { isValid: false, error: 'Could not read file header' };
+    }
+
+    return { isValid: true };
+  } catch (error) {
+    return { 
+      isValid: false, 
+      error: error instanceof Error ? error.message : 'Unknown validation error' 
+    };
+  }
+};
 
 export default function MergePDF() {
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -232,10 +411,20 @@ export default function MergePDF() {
   const { isLoaded, userId } = useAuth();
   const router = useRouter();
 
+  // Update sensors configuration for better mobile handling
   const sensors = useSensors(
-    useSensor(PointerSensor, {
+    useSensor(TouchSensor, {
+      // Activate immediately on touch
       activationConstraint: {
-        distance: 5, // 5px movement required before drag starts
+        delay: 0,
+        tolerance: 0
+      }
+    }),
+    useSensor(PointerSensor, {
+      // Better touch handling
+      activationConstraint: {
+        distance: 8, // Minimum distance before drag starts
+        tolerance: 5, // Movement tolerance
       }
     }),
     useSensor(KeyboardSensor, {
@@ -268,58 +457,103 @@ export default function MergePDF() {
     };
   }, [mergedPdfUrl]);
 
+  // Update handleFileUpload with improved validation and error handling
   const handleFileUpload = useCallback(async (uploadedFiles: File[]) => {
     const newFiles: FileItem[] = [];
     const errors: string[] = [];
+    const processedFiles = new Set<string>();
 
-    // Process files in parallel with limits
-    const processingPromises = uploadedFiles.map(async (file) => {
-      try {
-        // Check cache first
-        if (!validatedFiles.has(file)) {
-          const headerBuffer = await file.slice(0, 1024).arrayBuffer();
-          validatedFiles.set(file, validatePdfHeader(headerBuffer));
-        }
+    // Show processing state
+    setIsMerging(true);
 
-        if (!validatedFiles.get(file)) {
-          throw new Error(`${file.name} is not a valid PDF file`);
-        }
+    try {
+      // 1. First validate all files before processing
+      const validationResults = await Promise.all(
+        uploadedFiles.map(async (file) => ({
+          file,
+          validation: await validateFile(file)
+        }))
+      );
 
-        // Process file in chunks
-        const content = await processFileInChunks(file);
-        
-        newFiles.push({
-          id: crypto.randomUUID(),
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          content
+      // 2. Check for validation errors
+      const invalidFiles = validationResults.filter(result => !result.validation.isValid);
+      if (invalidFiles.length > 0) {
+        invalidFiles.forEach(({ file, validation }) => {
+          errors.push(`${file.name}: ${validation.error}`);
         });
-      } catch (error) {
-        errors.push(`Error processing ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        throw new Error('Some files failed validation');
       }
-    });
 
-    // Wait for all files to be processed
-    await Promise.all(processingPromises);
+      // 3. Process valid files
+      for (const { file } of validationResults) {
+        try {
+          // Skip if already processed
+          if (processedFiles.has(file.name)) {
+            console.log(`Skipping duplicate file: ${file.name}`);
+            continue;
+          }
+          processedFiles.add(file.name);
 
-    if (errors.length > 0) {
+          // Read file content
+          console.log(`Processing file: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)}MB)`);
+          const arrayBuffer = await file.arrayBuffer();
+          
+          if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+            throw new Error('Failed to read file content');
+          }
+
+          // Add to new files
+          newFiles.push({
+            id: crypto.randomUUID(),
+            name: file.name,
+            size: file.size,
+            type: file.type,
+            content: arrayBuffer
+          });
+
+          console.log(`Successfully processed: ${file.name}`);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          console.error(`Error processing ${file.name}:`, errorMessage);
+          errors.push(`${file.name}: ${errorMessage}`);
+        }
+      }
+
+      // 4. Handle results
+      if (errors.length > 0) {
+        // Show errors but don't throw if we have some successful files
+        toast({
+          title: `${errors.length} File Processing Error${errors.length > 1 ? 's' : ''}`,
+          description: errors.join('\n'),
+          variant: "destructive",
+          duration: 5000, // Show for 5 seconds due to multiple lines
+        });
+      }
+
+      if (newFiles.length > 0) {
+        setFiles(prev => [...prev, ...newFiles]);
+        toast({
+          title: "Files Added Successfully",
+          description: `Added ${newFiles.length} file${newFiles.length === 1 ? '' : 's'} (${(newFiles.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)`,
+          variant: "default",
+        });
+      } else {
+        throw new Error('No files were successfully processed');
+      }
+    } catch (error) {
+      // Show error toast
+      const errorMessage = error instanceof Error ? error.message : 'Failed to process files';
       toast({
-        title: "File Processing Errors",
-        description: errors.join('\n'),
+        title: "Error",
+        description: errors.length > 0 ? errors.join('\n') : errorMessage,
         variant: "destructive",
+        duration: 5000, // Show for 5 seconds due to multiple lines
       });
+    } finally {
+      // Reset processing state
+      setIsMerging(false);
     }
-
-    if (newFiles.length > 0) {
-      setFiles(prev => [...prev, ...newFiles]);
-      toast({
-        title: "Files Added",
-        description: `Successfully added ${newFiles.length} file${newFiles.length === 1 ? '' : 's'}`,
-        variant: "default",
-      });
-    }
-  }, [toast]);
+  }, [toast, setFiles]);
 
   const handleRemoveFile = useCallback((fileToRemove: FileItem) => {
     // Clean up file resources
@@ -433,6 +667,15 @@ export default function MergePDF() {
       return;
     }
 
+    if (files.length < 2) {
+      toast({
+        title: "Not enough files",
+        description: "Please select at least 2 PDF files to merge",
+        variant: "destructive",
+      });
+      return;
+    }
+
     // Check total size
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     if (totalSize > MAX_TOTAL_SIZE) {
@@ -444,129 +687,72 @@ export default function MergePDF() {
       return;
     }
 
-    // Check individual file sizes
-    const oversizedFiles = files.filter(file => file.size > MAX_FILE_SIZE);
-    if (oversizedFiles.length > 0) {
-      toast({
-        title: "Files too large",
-        description: `${oversizedFiles.length} file(s) exceed the 100MB limit. Please remove: ${oversizedFiles.map(f => f.name).join(', ')}`,
-        variant: "destructive",
-      });
-      return;
-    }
-
     // Cancel any existing merge operation
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
 
-    let progressInterval: NodeJS.Timeout | undefined;
-
-    const clearProgressInterval = () => {
-      if (progressInterval) {
-        clearInterval(progressInterval);
-        progressInterval = undefined;
-      }
-    };
+    // Create new abort controller
+    abortControllerRef.current = new AbortController();
 
     try {
       setIsMerging(true);
       setMergeProgress(0);
       setIsComplete(false);
-      setMergedPdfUrl(null);
+      if (mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+        setMergedPdfUrl(null);
+      }
 
-      // Prepare form data with compression
+      // Prepare form data
       const formData = new FormData();
       
-      // Process files in batches to manage memory
-      const BATCH_SIZE = 3; // Process 3 files at a time
-      const batches = [];
-      for (let i = 0; i < files.length; i += BATCH_SIZE) {
-        batches.push(files.slice(i, i + BATCH_SIZE));
-      }
+      // Show initial progress
+      setMergeProgress(10);
 
-      let processedSize = 0;
-      const processedFiles = [...files]; // Create a copy to preserve content
-
-      // Animated progress function
-      const animateProgress = async (from: number, to: number, duration: number) => {
-        const start = Date.now();
-        const animate = () => {
-          const now = Date.now();
-          const elapsed = now - start;
-          const progress = Math.min(elapsed / duration, 1);
-          
-          // Easing function for smooth animation
-          const eased = 1 - Math.pow(1 - progress, 3); // Cubic ease-out
-          
-          setMergeProgress(Math.round(from + (to - from) * eased));
-          
-          if (progress < 1) {
-            requestAnimationFrame(animate);
-          }
-        };
-        animate();
-        // Wait for animation to complete
-        await new Promise(resolve => setTimeout(resolve, duration));
-      };
-
-      // Initial progress animation
-      setMergeProgress(0);
-      await animateProgress(0, 20, 800); // Animate to 20% over 800ms
-
-      for (const batch of batches) {
-        await Promise.all(batch.map(async (fileItem) => {
+      // Add files to form data with progress tracking
+      const totalFiles = files.length;
+      for (let i = 0; i < files.length; i++) {
+        const fileItem = files[i];
+        
+        try {
           if (!fileItem.content) {
-            throw new Error(`Content not found for file ${fileItem.name}`);
+            throw new Error(`Content missing for file: ${fileItem.name}`);
           }
 
-          try {
-            // Create a blob from the content
-            const blob = new Blob([fileItem.content], { type: 'application/pdf' });
-            
-            // Verify PDF structure if not already validated
-            if (!validatedFiles.has(new File([blob], fileItem.name))) {
-              const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-              if (!validatePdfHeader(header.buffer)) {
-                throw new Error(`${fileItem.name} appears to be corrupted or is not a valid PDF`);
-              }
-            }
-
-            // Create a new file with the verified content
-            const file = new File([blob], fileItem.name, { 
-              type: 'application/pdf',
-              lastModified: Date.now()
-            });
-
-            formData.append("files", file);
-
-            // Update progress
-            processedSize += fileItem.size;
-          } catch (error) {
-            throw new Error(`Failed to process ${fileItem.name}: ${error instanceof Error ? error.message : 'Invalid PDF structure'}`);
+          // Create a blob from the content
+          const blob = new Blob([fileItem.content], { type: 'application/pdf' });
+          
+          // Verify PDF structure
+          const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+          const isPDFHeader = header[0] === 0x25 && // %
+                            header[1] === 0x50 && // P
+                            header[2] === 0x44 && // D
+                            header[3] === 0x46 && // F
+                            header[4] === 0x2D;   // -
+          
+          if (!isPDFHeader) {
+            throw new Error(`Invalid PDF format: ${fileItem.name}`);
           }
-        }));
+
+          // Add to form data
+          formData.append("files", new File([blob], fileItem.name, { type: 'application/pdf' }));
+          
+          // Update progress (10-50%)
+          setMergeProgress(10 + Math.floor((i + 1) / totalFiles * 40));
+        } catch (error) {
+          throw new Error(`Error processing ${fileItem.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
       }
 
-      // Animate progress for file processing completion
-      await animateProgress(20, 35, 600); // Animate to 35% over 600ms
-
-      // Now that all files are processed, we can clear their content
-      processedFiles.forEach(file => {
-        file.content = null;
-      });
-
-      await animateProgress(35, 50, 500); // Animate to 50% over 500ms
-
-      abortControllerRef.current = new AbortController();
-
-      // Add compression header
+      // Set headers for better performance
       const headers = new Headers({
+        'Accept': 'application/pdf',
         'Accept-Encoding': 'gzip, deflate',
-        'Content-Encoding': 'gzip'
       });
 
-      // Start merging operation
+      // Start merge request
+      setMergeProgress(50);
       const response = await fetch("/api/merge", {
         method: "POST",
         body: formData,
@@ -579,66 +765,58 @@ export default function MergePDF() {
         throw new Error(errorData.error || "Failed to merge PDFs");
       }
 
-      // Animate progress for merge initialization
-      await animateProgress(50, 75, 1000); // Animate to 75% over 1s
-
-      // Create a reader to read the response as a stream
+      // Read response as blob with progress tracking
+      setMergeProgress(60);
       const reader = response.body?.getReader();
       if (!reader) {
         throw new Error("Failed to get response reader");
       }
 
-      // Accumulate chunks for the final PDF
       const chunks: Uint8Array[] = [];
+      let receivedLength = 0;
       
-      // Animate to 85% while receiving data
-      const mergeAnimation = animateProgress(75, 85, 1200);
-      
-      // Read the stream
       while (true) {
         const { done, value } = await reader.read();
         
-        if (done) {
-          break;
-        }
+        if (done) break;
+        
         chunks.push(value);
+        receivedLength += value.length;
+        
+        // Update progress (60-90%)
+        setMergeProgress(60 + Math.floor((receivedLength / totalSize) * 30));
       }
 
-      // Wait for the merge animation to complete
-      await mergeAnimation;
-      
-      // Animate final stages
-      await animateProgress(85, 95, 800); // Animate to 95% over 800ms
-
-      // Combine all chunks into a single blob
+      // Combine chunks and create blob
+      setMergeProgress(90);
       const blob = new Blob(chunks, { type: 'application/pdf' });
       
       if (blob.size === 0) {
         throw new Error("Generated PDF is empty");
       }
 
-      // Verify merged PDF header
-      const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-      if (!validatePdfHeader(header.buffer)) {
-        throw new Error("Generated PDF appears to be corrupted");
+      // Verify merged PDF
+      const mergedHeader = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+      const isMergedPDFValid = mergedHeader[0] === 0x25 && // %
+                              mergedHeader[1] === 0x50 && // P
+                              mergedHeader[2] === 0x44 && // D
+                              mergedHeader[3] === 0x46 && // F
+                              mergedHeader[4] === 0x2D;   // -
+
+      if (!isMergedPDFValid) {
+        throw new Error("Generated PDF is corrupted");
       }
 
-      // Clean up old URL if it exists
-      if (mergedPdfUrl) {
-        URL.revokeObjectURL(mergedPdfUrl);
-      }
-
+      // Create URL and finish
       const url = URL.createObjectURL(blob);
       setMergedPdfUrl(url);
-      
-      // Final progress animation
-      await animateProgress(95, 100, 500); // Animate to 100% over 500ms
+      setMergeProgress(100);
       setIsComplete(true);
 
       toast({
         title: "Success!",
         description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
-        variant: "default"
+        variant: "default",
       });
 
     } catch (error) {
@@ -647,10 +825,9 @@ export default function MergePDF() {
       
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "The operation was cancelled. Please try with fewer or smaller files.";
+          errorMessage = "Operation cancelled. Please try again.";
         } else {
-          // Clean up the error message
-          errorMessage = error.message.replace(/Error: /g, '').replace(/\[object \w+\]/g, 'PDF');
+          errorMessage = error.message;
         }
       }
 
@@ -658,37 +835,21 @@ export default function MergePDF() {
         title: "Error",
         description: errorMessage,
         variant: "destructive",
+        duration: 5000,
       });
-    } finally {
-      setIsMerging(false);
-      if (!isComplete) {
-        setMergeProgress(0);
-      }
-      clearProgressInterval();
-      abortControllerRef.current = null;
 
-      // Clean up any temporary blobs
-      if (!isComplete && mergedPdfUrl) {
+      // Reset states on error
+      setIsComplete(false);
+      setMergeProgress(0);
+      if (mergedPdfUrl) {
         URL.revokeObjectURL(mergedPdfUrl);
         setMergedPdfUrl(null);
       }
-
-      // Clear file contents to free memory
-      setFiles(prevFiles => prevFiles.map(file => ({
-        ...file,
-        content: null
-      })));
-
-      // Force garbage collection if available
-      if (typeof window.gc === 'function') {
-        try {
-          window.gc();
-        } catch (e) {
-          // Ignore if gc is not available
-        }
-      }
+    } finally {
+      setIsMerging(false);
+      abortControllerRef.current = null;
     }
-  }, [files, isComplete, mergedPdfUrl, toast]);
+  }, [files, mergedPdfUrl, toast]);
 
   const handleDownload = useCallback(() => {
     if (!mergedPdfUrl) return;
@@ -799,40 +960,59 @@ export default function MergePDF() {
               </div>
 
               {files.length > 0 && (
-                <div className="space-y-3 bg-card/95 p-3 sm:p-5 rounded-lg sm:rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm transition-all duration-300">
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-                    <div className="space-y-0.5 w-full sm:w-auto">
-                      <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
-                        Selected Files
-                        <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
-                          {files.length}
-                        </span>
-                      </h2>
-                      <p className="text-xs text-muted-foreground">
-                        {(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total
-                      </p>
+                <div className="space-y-3 bg-card/95 p-3 sm:p-5 rounded-lg sm:rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm">
+                  <div className="space-y-2">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                      <div className="space-y-0.5 w-full sm:w-auto">
+                        <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+                          Selected Files
+                          <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
+                            {files.length}
+                          </span>
+                        </h2>
+                        <div className="flex flex-col gap-0.5">
+                          <p className="text-xs text-muted-foreground">
+                            {(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total
+                          </p>
+                          <p className="text-xs flex items-center gap-1.5 text-muted-foreground">
+                            <GripVertical className="h-3 w-3" />
+                            Drag files to reorder them
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleClearAll}
+                        className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto text-xs"
+                      >
+                        Clear All
+                      </Button>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={handleClearAll}
-                      className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto text-xs"
-                    >
-                      Clear All
-                    </Button>
                   </div>
 
                   <DndContext
                     sensors={sensors}
                     collisionDetection={closestCenter}
                     onDragEnd={handleDragEnd}
+                    modifiers={[restrictToVerticalAxis]}
+                    measuring={{
+                      droppable: {
+                        strategy: MeasuringStrategy.Always
+                      }
+                    }}
                   >
                     <SortableContext
                       items={files}
                       strategy={verticalListSortingStrategy}
                     >
-                      <AnimatePresence mode="popLayout">
-                        <div className="space-y-1.5 max-h-[160px] sm:max-h-[250px] overflow-y-auto custom-scrollbar">
+                      <motion.div 
+                        variants={containerVariants}
+                        initial="hidden"
+                        animate="visible"
+                        className="space-y-1.5 max-h-[calc(100vh-300px)] sm:max-h-[250px] overflow-y-auto overscroll-contain custom-scrollbar"
+                      >
+                        <AnimatePresence mode="popLayout">
                           {files.map((file) => (
                             <SortableFileItem
                               key={file.id}
@@ -840,8 +1020,8 @@ export default function MergePDF() {
                               onRemove={handleRemoveFile}
                             />
                           ))}
-                        </div>
-                      </AnimatePresence>
+                        </AnimatePresence>
+                      </motion.div>
                     </SortableContext>
                   </DndContext>
 

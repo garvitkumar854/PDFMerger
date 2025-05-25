@@ -11,6 +11,10 @@ interface WorkerMetrics {
   averageProcessingTime: number;
   lastUsed: number;
   errors: string[];
+  memory: {
+    heapUsed: number;
+    heapTotal: number;
+  };
 }
 
 interface PoolMetrics {
@@ -21,6 +25,11 @@ interface PoolMetrics {
   averageWaitTime: number;
   cpuUsage: number;
 }
+
+// Add efficient memory management
+const MEMORY_LIMIT = process.env.NODE_ENV === 'production' ? 
+  Math.floor(os.totalmem() * 0.7) : // 70% of total memory in production
+  Math.floor(os.totalmem() * 0.8);  // 80% of total memory in development
 
 export class WorkerPool extends EventEmitter {
   private workers: Map<Worker, WorkerMetrics> = new Map();
@@ -37,6 +46,8 @@ export class WorkerPool extends EventEmitter {
   private isShuttingDown = false;
   private healthCheckInterval!: NodeJS.Timeout;
   private metricsInterval!: NodeJS.Timeout;
+  private lastScaleCheck = Date.now();
+  private scaleCheckInterval = 5000; // 5 seconds
 
   constructor(
     private poolSize = Math.max(Math.floor(os.cpus().length * 0.75), 2), // Keep 75% of CPU cores, min 2
@@ -47,6 +58,7 @@ export class WorkerPool extends EventEmitter {
     super();
     this.initializeHealthCheck();
     this.initializeMetricsReporting();
+    this.initializeMemoryMonitoring();
     
     // Pre-initialize some workers for faster startup
     for (let i = 0; i < Math.min(2, this.poolSize); i++) {
@@ -74,6 +86,34 @@ export class WorkerPool extends EventEmitter {
     }, 30000);
   }
 
+  private initializeMemoryMonitoring() {
+    setInterval(() => {
+      const used = process.memoryUsage();
+      if (used.heapUsed > MEMORY_LIMIT) {
+        this.handleMemoryPressure();
+      }
+    }, 30000); // Check every 30 seconds
+  }
+
+  private async handleMemoryPressure() {
+    // Terminate idle workers
+    const now = Date.now();
+    for (const [worker, metrics] of this.workers.entries()) {
+      if (now - metrics.lastUsed > 30000) { // 30 seconds idle
+        await this.terminateWorker(worker);
+      }
+    }
+    
+    // Force garbage collection if available
+    if (global.gc) {
+      try {
+        global.gc();
+      } catch (e) {
+        // Ignore if gc is not available
+      }
+    }
+  }
+
   private async performHealthCheck(): Promise<void> {
     const now = Date.now();
     
@@ -98,7 +138,7 @@ export class WorkerPool extends EventEmitter {
       }
     }
 
-    // Scale workers based on load
+    // Dynamic scaling based on load and memory
     this.adjustWorkerCount();
   }
 
@@ -113,32 +153,46 @@ export class WorkerPool extends EventEmitter {
   }
 
   private adjustWorkerCount(): void {
+    const now = Date.now();
+    if (now - this.lastScaleCheck < this.scaleCheckInterval) {
+      return;
+    }
+    this.lastScaleCheck = now;
+
     const queueLength = this.queue.length;
     const currentWorkers = this.workers.size;
+    const memoryUsage = process.memoryUsage();
+    const memoryPressure = memoryUsage.heapUsed / MEMORY_LIMIT;
     
-    // More aggressive scaling based on queue length
-    if (queueLength > 0) {
-      const desiredWorkers = Math.min(
-        this.poolSize,
-        Math.max(
-          2, // Minimum workers
-          Math.ceil(queueLength * 0.75), // 75% of queue length
-          currentWorkers // Don't reduce below current
-        )
+    // Calculate optimal worker count based on multiple factors
+    let desiredWorkers = Math.min(
+      this.poolSize,
+      Math.max(
+        2, // Minimum workers
+        Math.ceil(queueLength * 0.75), // 75% of queue length
+        Math.floor(this.poolSize * (1 - memoryPressure)) // Reduce workers under memory pressure
+      )
+    );
+
+    // Adjust for high memory pressure
+    if (memoryPressure > 0.85) {
+      desiredWorkers = Math.min(desiredWorkers, Math.ceil(this.poolSize * 0.5));
+    }
+
+    if (currentWorkers < desiredWorkers) {
+      // Scale up gradually
+      const workersToAdd = Math.min(
+        desiredWorkers - currentWorkers,
+        Math.ceil((desiredWorkers - currentWorkers) * 0.5) // Add 50% of difference
       );
-      
-      if (currentWorkers < desiredWorkers) {
-        // Scale up
-        const workersToAdd = desiredWorkers - currentWorkers;
-        for (let i = 0; i < workersToAdd; i++) {
-          this.createWorker().catch(console.error);
-        }
+      for (let i = 0; i < workersToAdd; i++) {
+        this.createWorker().catch(console.error);
       }
-    } else if (queueLength === 0 && currentWorkers > 2) {
-      // Scale down but keep at least 2 workers
+    } else if (currentWorkers > desiredWorkers) {
+      // Scale down idle workers
       const excessWorkers = Array.from(this.workers.entries())
-        .filter(([, metrics]) => Date.now() - metrics.lastUsed > 30000) // Idle for 30 seconds
-        .slice(0, currentWorkers - 2);
+        .filter(([, metrics]) => Date.now() - metrics.lastUsed > 30000)
+        .slice(0, currentWorkers - desiredWorkers);
       
       for (const [worker] of excessWorkers) {
         this.terminateWorker(worker).catch(console.error);
@@ -169,7 +223,11 @@ export class WorkerPool extends EventEmitter {
       totalProcessingTime: 0,
       averageProcessingTime: 0,
       lastUsed: Date.now(),
-      errors: []
+      errors: [],
+      memory: {
+        heapUsed: process.memoryUsage().heapUsed,
+        heapTotal: process.memoryUsage().heapTotal
+      }
     });
 
     worker.on('error', (err) => {

@@ -1,25 +1,80 @@
 const { parentPort } = require('worker_threads');
 const { PDFDocument } = require('pdf-lib');
 
-// Utility function to validate PDF header
-function validatePDFHeader(buffer) {
-  if (buffer.length < 5) return false;
-  
-  // Look for PDF signature within first 1024 bytes
-  for (let i = 0; i < Math.min(buffer.length - 4, 1024); i++) {
-    if (buffer[i] === 0x25 && // %
-        buffer[i + 1] === 0x50 && // P
-        buffer[i + 2] === 0x44 && // D
-        buffer[i + 3] === 0x46 && // F
-        buffer[i + 4] === 0x2D) { // -
-      return true;
-    }
-  }
-  return false;
-}
-
-// Add memory optimization utilities
+// Constants for optimization
 const MEMORY_CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+const MAX_PROCESSING_TIME = 180000; // 3 minutes
+
+// Enhanced PDF validation with more robust checks
+async function validatePDF(buffer) {
+  try {
+    // Check for absolute minimum file size (even smallest valid PDF should be at least 67 bytes)
+    if (buffer.byteLength < 67) {
+      throw new Error('File is too small to be a valid PDF (minimum 67 bytes)');
+    }
+
+    // Get the first 1024 bytes to search for PDF header
+    const headerBuffer = new Uint8Array(buffer.slice(0, Math.min(1024, buffer.byteLength)));
+    const headerString = new TextDecoder().decode(headerBuffer);
+
+    // Check for PDF signature anywhere in the first 1024 bytes
+    if (!headerString.includes('%PDF-')) {
+      // Try checking for binary PDF signature as fallback
+      const hasBinarySignature = headerBuffer.some((byte, index, array) => {
+        if (index > array.length - 5) return false;
+        return (
+          array[index] === 0x25 && // %
+          array[index + 1] === 0x50 && // P
+          array[index + 2] === 0x44 && // D
+          array[index + 3] === 0x46 && // F
+          array[index + 4] === 0x2D // -
+        );
+      });
+
+      if (!hasBinarySignature) {
+        throw new Error('Invalid PDF header: Missing PDF signature');
+      }
+    }
+
+    // Try to load and parse the PDF with different options
+    let pdfDoc;
+    try {
+      // First attempt with standard options
+      pdfDoc = await PDFDocument.load(buffer, {
+        updateMetadata: false,
+        ignoreEncryption: true,
+        throwOnInvalidObject: false
+      });
+    } catch (e) {
+      // Second attempt with more lenient options
+      pdfDoc = await PDFDocument.load(buffer, {
+        updateMetadata: false,
+        ignoreEncryption: true,
+        throwOnInvalidObject: false,
+        parseSpeed: 100,
+        capNumbers: true
+      });
+    }
+
+    // Check for pages
+    if (!pdfDoc || pdfDoc.getPageCount() === 0) {
+      throw new Error('PDF has no pages');
+    }
+
+    // Verify page integrity
+    const pages = pdfDoc.getPages();
+    await Promise.all(pages.map(async (page) => {
+      const { width, height } = page.getSize();
+      if (!width || !height || width <= 0 || height <= 0) {
+        throw new Error('Invalid page dimensions');
+      }
+    }));
+
+    return true;
+  } catch (error) {
+    throw new Error(`PDF validation failed: ${error.message}`);
+  }
+}
 
 // Optimize buffer handling
 function optimizeBuffer(buffer) {
@@ -80,9 +135,11 @@ async function optimizePDF(pdfDoc) {
   }
 }
 
+// Process PDF in worker
 async function processPDFInWorker(pdfBuffer) {
+  const startTime = Date.now();
   const metrics = {
-    startTime: Date.now(),
+    startTime,
     endTime: 0,
     pageCount: 0,
     fileSize: pdfBuffer ? pdfBuffer.byteLength : 0,
@@ -91,47 +148,28 @@ async function processPDFInWorker(pdfBuffer) {
   };
 
   try {
+    // Validate PDF
+    await validatePDF(pdfBuffer);
+
     // Optimize buffer handling
     const buffer = optimizeBuffer(pdfBuffer instanceof Uint8Array ? pdfBuffer : new Uint8Array(pdfBuffer));
 
-    // Validate and process in parallel
-    const [isValid, initialDoc] = await Promise.all([
-      validatePDFHeader(buffer),
-      PDFDocument.load(buffer, {
-        updateMetadata: false,
-        ignoreEncryption: true,
-        parseSpeed: buffer.length < 10 * 1024 * 1024 ? 1500 : 500,
-        throwOnInvalidObject: false
-      }).catch(() => null)
-    ]);
+    // Load PDF with optimized settings
+    const pdfDoc = await PDFDocument.load(buffer, {
+      updateMetadata: false,
+      ignoreEncryption: true,
+      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 1500 : 500,
+      throwOnInvalidObject: false
+    });
 
-    if (!isValid) {
-      throw new Error('Invalid PDF format: Missing PDF header');
-    }
-
-    let pdfDoc = initialDoc;
-    if (!pdfDoc) {
-      // Fallback to conservative loading
-      pdfDoc = await PDFDocument.load(buffer, {
-        updateMetadata: false,
-        ignoreEncryption: true,
-        parseSpeed: 100,
-        throwOnInvalidObject: false,
-        capNumbers: true
-      });
-    }
-
-    if (!pdfDoc) {
-      throw new Error('Failed to load PDF document');
-    }
-
-    // Process pages in optimized chunks
+    // Get page count
     const pageCount = pdfDoc.getPageCount();
     metrics.pageCount = pageCount;
 
+    // Optimize large PDFs
     if (pageCount > 10 || buffer.length > 10 * 1024 * 1024) {
       const optimizationStart = Date.now();
-      pdfDoc = await optimizePDF(pdfDoc);
+      await optimizePDF(pdfDoc);
       metrics.optimizationTime = Date.now() - optimizationStart;
     }
 
@@ -142,71 +180,53 @@ async function processPDFInWorker(pdfBuffer) {
         const end = Math.min(i + chunkSize, pageCount);
         await pdfDoc.getPages().slice(i, end);
         
+        // Add small delays for very large files to prevent blocking
         if (buffer.length > 50 * 1024 * 1024) {
           await new Promise(resolve => setTimeout(resolve, 5));
+        }
+
+        // Check processing time
+        if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+          throw new Error('Processing timeout exceeded');
         }
       }
     }
 
+    // Save with optimized settings
+    const optimizedPdfBytes = await pdfDoc.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+      objectsPerTick: Math.min(50, Math.ceil(pageCount / 2))
+    });
+
     metrics.endTime = Date.now();
+    metrics.compressionRatio = optimizedPdfBytes.length / buffer.length;
+
     return {
       success: true,
-      metrics,
-      document: pdfDoc
+      buffer: optimizedPdfBytes,
+      metrics
     };
+
   } catch (error) {
     metrics.endTime = Date.now();
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error processing PDF',
+      error: error.message,
       metrics
     };
   }
 }
 
-// Initialize worker
-if (!parentPort) {
-  throw new Error('Worker must be run as a worker thread');
-}
-
-// Handle incoming messages
+// Handle messages from main thread
 parentPort.on('message', async (data) => {
-  if (!data || !data.pdfBuffer) {
-    parentPort.postMessage({
-      success: false,
-      error: 'No PDF buffer provided in message',
-      metrics: {
-        error: true,
-        initializationFailed: true
-      }
-    });
-    return;
-  }
-
   try {
     const result = await processPDFInWorker(data.pdfBuffer);
-    if (result.success && result.buffer) {
-      // Convert buffer to Uint8Array for transfer
-      const transferableBuffer = new Uint8Array(result.buffer);
-      parentPort.postMessage(
-        {
-          ...result,
-          buffer: transferableBuffer.buffer
-        },
-        [transferableBuffer.buffer]
-      );
-    } else {
-      parentPort.postMessage(result);
-    }
+    parentPort.postMessage(result);
   } catch (error) {
     parentPort.postMessage({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      metrics: {
-        error: true,
-        initializationFailed: true,
-        errorDetails: error instanceof Error ? error.stack : undefined
-      }
+      error: error.message
     });
   }
 });

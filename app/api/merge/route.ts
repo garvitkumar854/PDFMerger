@@ -3,6 +3,7 @@ import { PDFDocument } from "pdf-lib";
 import { WorkerPool } from "../utils/workerPool";
 import { createHash } from "crypto";
 import { headers } from 'next/headers';
+import { performanceMonitor } from "../monitoring";
 
 // Constants
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
@@ -12,303 +13,119 @@ const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 const MEDIUM_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
 const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for streaming
 
+// Enhanced PDF validation with more robust checks
+const validatePDF = async (buffer: ArrayBuffer): Promise<{ isValid: boolean; error?: string }> => {
+  try {
+    // Check for absolute minimum file size (even smallest valid PDF should be at least 67 bytes)
+    if (buffer.byteLength < 67) {
+      return { isValid: false, error: 'File is too small to be a valid PDF (minimum 67 bytes)' };
+    }
+
+    // Get the first 1024 bytes to search for PDF header
+    const headerBuffer = new Uint8Array(buffer.slice(0, Math.min(1024, buffer.byteLength)));
+    const headerString = new TextDecoder().decode(headerBuffer);
+
+    // Check for PDF signature anywhere in the first 1024 bytes
+    // Some PDFs might have extra bytes before the header
+    if (!headerString.includes('%PDF-')) {
+      // Try checking for binary PDF signature as fallback
+      const hasBinarySignature = headerBuffer.some((byte, index, array) => {
+        if (index > array.length - 5) return false;
+        return (
+          array[index] === 0x25 && // %
+          array[index + 1] === 0x50 && // P
+          array[index + 2] === 0x44 && // D
+          array[index + 3] === 0x46 && // F
+          array[index + 4] === 0x2D // -
+        );
+      });
+
+      if (!hasBinarySignature) {
+        return { isValid: false, error: 'Invalid PDF header: Missing PDF signature' };
+      }
+    }
+
+    // Try to load and parse the PDF with different options
+    let pdfDoc;
+    try {
+      // First attempt with standard options
+      pdfDoc = await PDFDocument.load(buffer, {
+        updateMetadata: false,
+        ignoreEncryption: true,
+        throwOnInvalidObject: false
+      });
+    } catch (e) {
+      // Second attempt with more lenient options
+      try {
+        pdfDoc = await PDFDocument.load(buffer, {
+          updateMetadata: false,
+          ignoreEncryption: true,
+          throwOnInvalidObject: false,
+          parseSpeed: 100,
+          capNumbers: true
+        });
+      } catch (e2) {
+        return { 
+          isValid: false, 
+          error: `Failed to parse PDF: ${e2 instanceof Error ? e2.message.replace('Error: ', '') : 'Invalid PDF structure'}`
+        };
+      }
+    }
+
+    // Additional validations
+    if (!pdfDoc) {
+      return { isValid: false, error: 'Failed to load PDF document' };
+    }
+
+    const pageCount = pdfDoc.getPageCount();
+    if (pageCount === 0) {
+      return { isValid: false, error: 'PDF has no pages' };
+    }
+
+    // Check for corrupted objects
+    try {
+      const pages = pdfDoc.getPages();
+      await Promise.all(pages.map(async (page) => {
+        // Try to access basic page properties to verify integrity
+        const { width, height } = page.getSize();
+        if (!width || !height || width <= 0 || height <= 0) {
+          throw new Error('Invalid page dimensions');
+        }
+      }));
+    } catch (e) {
+      return { 
+        isValid: false, 
+        error: 'PDF contains corrupted pages or objects' 
+      };
+    }
+
+    return { isValid: true };
+  } catch (error) {
+    return { 
+      isValid: false, 
+      error: error instanceof Error ? 
+        error.message.replace(/Error: /g, '') : 
+        'Invalid PDF structure'
+    };
+  }
+};
+
 // Initialize worker pool with monitoring
 const workerPool = new WorkerPool();
 
 // Enhanced monitoring
 workerPool.on('metrics', (metrics) => {
-  console.log('Worker Pool Metrics:', metrics);
+  performanceMonitor.trackRequest(metrics.averageWaitTime);
 });
 
-workerPool.on('queueWarning', (warning) => {
-  console.warn('Queue Warning:', warning);
-});
-
-workerPool.on('workerError', ({ error, workerId }) => {
-  console.error(`Worker ${workerId} error:`, error);
-});
-
-// Enhanced cache with TTL, size limits, and analytics
-class PDFCache {
-  private cache = new Map<string, {
-    data: Uint8Array;
-    timestamp: number;
-    size: number;
-    hits: number;
-    lastAccessed: number;
-  }>();
-  private maxSize = 500 * 1024 * 1024; // 500MB total cache size
-  private currentSize = 0;
-  private stats = {
-    totalHits: 0,
-    totalMisses: 0,
-    totalEvictions: 0,
-    averageAccessTime: 0
-  };
-
-  set(key: string, data: Uint8Array): void {
-    const hash = createHash('sha256').update(data).digest('hex');
-    
-    // Check for duplicates with content-based deduplication
-    const entries = Array.from(this.cache.entries());
-    for (const [existingKey, value] of entries) {
-      const existingHash = createHash('sha256').update(value.data).digest('hex');
-      if (existingHash === hash) {
-        value.hits++;
-        value.lastAccessed = Date.now();
-        this.cache.set(key, value);
-        return;
-      }
-    }
-
-    // Implement LRU eviction if cache is full
-    while (this.currentSize + data.length > this.maxSize && this.cache.size > 0) {
-      const oldestKey = Array.from(this.cache.entries())
-        .reduce((oldest, current) => {
-          const currentScore = current[1].lastAccessed + (current[1].hits * 1000);
-          const oldestScore = oldest[1].lastAccessed + (oldest[1].hits * 1000);
-          return currentScore < oldestScore ? current : oldest;
-        })[0];
-      
-      const oldEntry = this.cache.get(oldestKey);
-      if (oldEntry) {
-        this.currentSize -= oldEntry.size;
-        this.cache.delete(oldestKey);
-        this.stats.totalEvictions++;
-      }
-    }
-
-    // Add new entry
-    this.cache.set(key, {
-      data,
-      timestamp: Date.now(),
-      size: data.length,
-      hits: 1,
-      lastAccessed: Date.now()
-    });
-    this.currentSize += data.length;
-  }
-
-  get(key: string): Uint8Array | undefined {
-    const entry = this.cache.get(key);
-    if (entry) {
-      const now = Date.now();
-      // Check if entry is still valid (less than 30 minutes old)
-      if (now - entry.timestamp < 30 * 60 * 1000) {
-        entry.hits++;
-        entry.lastAccessed = now;
-        this.stats.totalHits++;
-        return entry.data;
-      }
-      // Remove expired entry
-      this.currentSize -= entry.size;
-      this.cache.delete(key);
-      this.stats.totalMisses++;
-    } else {
-      this.stats.totalMisses++;
-    }
-    return undefined;
-  }
-
-  getStats() {
-    return {
-      ...this.stats,
-      cacheSize: this.currentSize,
-      maxSize: this.maxSize,
-      utilization: (this.currentSize / this.maxSize) * 100,
-      entryCount: this.cache.size,
-      hitRate: this.stats.totalHits / (this.stats.totalHits + this.stats.totalMisses) * 100
-    };
-  }
-
-  cleanup(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.cache.entries()) {
-      if (now - entry.timestamp > 30 * 60 * 1000) {
-        this.currentSize -= entry.size;
-        this.cache.delete(key);
-        this.stats.totalEvictions++;
-      }
-    }
-  }
-}
-
-const pdfCache = new PDFCache();
-const cleanupInterval = setInterval(() => pdfCache.cleanup(), 5 * 60 * 1000);
-
-// Cleanup on module unload
-if (process.env.NODE_ENV !== 'production') {
-  process.on('beforeExit', () => {
-    clearInterval(cleanupInterval);
-    workerPool.shutdown().catch(console.error);
-  });
-}
-
-// Cleanup on production server shutdown
-if (process.env.NODE_ENV === 'production') {
-  process.on('SIGTERM', () => {
-    clearInterval(cleanupInterval);
-    workerPool.shutdown().catch(console.error);
-  });
-}
-
-// Utility function to create a streaming response
-function createStreamingResponse(data: Uint8Array, filename: string) {
-  // For small files, return directly without streaming
-  if (data.length < SMALL_FILE_THRESHOLD) {
-    return new NextResponse(data, {
-      headers: {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Content-Length': data.length.toString(),
-        'Cache-Control': 'no-cache'
-      }
-    });
-  }
-
-  // For larger files, use streaming with optimized chunks
-  const chunks: Uint8Array[] = [];
-  const chunkSize = data.length < MEDIUM_FILE_THRESHOLD ? 1024 * 1024 : CHUNK_SIZE;
-  
-  for (let i = 0; i < data.length; i += chunkSize) {
-    chunks.push(data.slice(i, i + chunkSize));
-  }
-
-  const stream = new ReadableStream({
-    start(controller) {
-      chunks.forEach(chunk => controller.enqueue(chunk));
-      controller.close();
-    }
-  });
-
-  return new NextResponse(stream, {
-    headers: {
-      'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Content-Length': data.length.toString(),
-      'Cache-Control': 'no-cache',
-      'Transfer-Encoding': 'chunked'
-    }
-  });
-}
-
-// Add retry utility
-async function retryOperation<T>(
-  operation: () => Promise<T>,
-  maxRetries: number = 3,
-  delay: number = 1000
-): Promise<T> {
-  let lastError: Error | null = null;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      if (attempt === maxRetries) break;
-      await new Promise(resolve => setTimeout(resolve, delay * attempt));
-    }
-  }
-  
-  throw lastError;
-}
-
-// Helper function to get error message
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-// Helper function to create error response
-function createErrorResponse(message: string, status = 400) {
-  return new Response(
-    JSON.stringify({ error: message }),
-    {
-      status,
-      headers: { 'Content-Type': 'application/json' }
-    }
+// Enhanced error handling
+const createErrorResponse = (error: string, status: number = 400) => {
+  performanceMonitor.trackRequest(0, true);
+  return NextResponse.json(
+    { error },
+    { status, headers: { 'Content-Type': 'application/json' } }
   );
-}
-
-// Add optimized chunk processing
-const PROCESSING_CHUNK_SIZE = 5;
-
-// Optimize parallel processing
-async function processFilesInParallel(files: File[], startTime: number) {
-  const chunks: File[][] = [];
-  for (let i = 0; i < files.length; i += PROCESSING_CHUNK_SIZE) {
-    chunks.push(files.slice(i, i + PROCESSING_CHUNK_SIZE));
-  }
-
-  const pdfBuffers: ArrayBuffer[] = [];
-  const fileMetadata: { name: string; size: number; hash: string }[] = [];
-  let totalSize = 0;
-
-  // Process chunks in sequence, but files within chunks in parallel
-  for (const chunk of chunks) {
-    const chunkResults = await Promise.all(chunk.map(async (file) => {
-      if (!file.type && !file.name.toLowerCase().endsWith('.pdf')) {
-        throw new Error(`File ${file.name} is not a valid PDF`);
-      }
-
-      if (file.size > MAX_FILE_SIZE) {
-        throw new Error(`File ${file.name} exceeds maximum size of 100MB`);
-      }
-
-      try {
-        const buffer = await retryOperation(async () => {
-          if (file.size < SMALL_FILE_THRESHOLD) {
-            return await file.arrayBuffer();
-          }
-
-          const chunks: Uint8Array[] = [];
-          const reader = file.stream().getReader();
-          const chunkSize = file.size < MEDIUM_FILE_THRESHOLD ? 2 * 1024 * 1024 : CHUNK_SIZE;
-          
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            
-            if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-              throw new Error("Processing timeout exceeded");
-            }
-
-            if (file.size >= MEDIUM_FILE_THRESHOLD) {
-              await new Promise(resolve => setTimeout(resolve, 5));
-            }
-          }
-
-          return await new Blob(chunks).arrayBuffer();
-        }, 3);
-
-        const hash = createHash('sha256').update(new Uint8Array(buffer)).digest('hex');
-        
-        return {
-          buffer,
-          metadata: { name: file.name, size: file.size, hash }
-        };
-      } catch (error) {
-        throw new Error(`Failed to load ${file.name}: ${getErrorMessage(error)}`);
-      }
-    }));
-
-    // Add results to main arrays
-    for (const result of chunkResults) {
-      pdfBuffers.push(result.buffer);
-      fileMetadata.push(result.metadata);
-      totalSize += result.metadata.size;
-
-      if (totalSize > MAX_TOTAL_SIZE) {
-        throw new Error("Total file size exceeds 200MB limit");
-      }
-    }
-  }
-
-  return { pdfBuffers, fileMetadata, totalSize };
-}
+};
 
 export async function POST(request: Request) {
   const startTime = Date.now();
@@ -339,39 +156,55 @@ export async function POST(request: Request) {
       return createErrorResponse("At least two PDF files are required");
     }
 
-    console.log(`[${requestId}] Processing ${files.length} files`);
-
-    // Process files in optimized parallel chunks
-    const { pdfBuffers, fileMetadata, totalSize } = await processFilesInParallel(files, startTime);
-
-    // Generate cache key and check cache
-    const cacheKey = fileMetadata.map(f => f.hash).sort().join('|');
-    const cachedResult = pdfCache.get(cacheKey);
-    
-    if (cachedResult) {
-      console.log(`[${requestId}] Cache hit! Serving cached result`);
-      return createStreamingResponse(cachedResult, `merged-${new Date().toISOString().slice(0, 10)}.pdf`);
+    if (files.length > 10) {
+      return createErrorResponse("Maximum 10 files allowed");
     }
 
-    console.log(`[${requestId}] Cache miss. Processing files...`);
+    console.log(`[${requestId}] Processing ${files.length} files`);
+
+    // Validate and process files
+    const processedFiles: { buffer: ArrayBuffer; name: string }[] = [];
+    let totalSize = 0;
+
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE) {
+        return createErrorResponse(`File ${file.name} exceeds maximum size of 100MB`);
+      }
+
+      totalSize += file.size;
+      if (totalSize > MAX_TOTAL_SIZE) {
+        return createErrorResponse("Total file size exceeds 200MB limit");
+      }
+
+      const buffer = await file.arrayBuffer();
+      const validation = await validatePDF(buffer);
+      
+      if (!validation.isValid) {
+        return createErrorResponse(`Invalid PDF file (${file.name}): ${validation.error}`);
+      }
+
+      processedFiles.push({ buffer, name: file.name });
+    }
 
     // Create and optimize the merged PDF
     const mergedPdf = await PDFDocument.create();
     
-    // Process PDFs in parallel chunks
-    const chunkSize = Math.min(5, Math.ceil(pdfBuffers.length / 4));
-    for (let i = 0; i < pdfBuffers.length; i += chunkSize) {
-      const chunk = pdfBuffers.slice(i, i + chunkSize);
-      const chunkDocs = await Promise.all(chunk.map(buffer => 
-        PDFDocument.load(buffer, { ignoreEncryption: true })
-      ));
+    // Process PDFs in sequence to maintain order
+    for (const { buffer, name } of processedFiles) {
+      try {
+        const pdfDoc = await PDFDocument.load(buffer, { 
+          ignoreEncryption: true,
+          updateMetadata: false,
+          throwOnInvalidObject: false
+        });
 
-      for (let j = 0; j < chunkDocs.length; j++) {
-        const pdfDoc = chunkDocs[j];
         const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
         pages.forEach(page => mergedPdf.addPage(page));
 
-        console.log(`[${requestId}] Processed ${fileMetadata[i + j].name}: ${pages.length} pages`);
+        console.log(`[${requestId}] Processed ${name}: ${pages.length} pages`);
+      } catch (error) {
+        console.error(`[${requestId}] Error processing ${name}:`, error);
+        return createErrorResponse(`Failed to process ${name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
 
       if (Date.now() - startTime > MAX_PROCESSING_TIME) {
@@ -379,30 +212,36 @@ export async function POST(request: Request) {
       }
     }
 
-    // Save the merged PDF with optimized settings
+    // Save with optimized settings
     const mergedPdfBytes = await mergedPdf.save({
       useObjectStreams: true,
       addDefaultPage: false,
       objectsPerTick: Math.min(50, Math.ceil(mergedPdf.getPageCount() / 2))
     });
+
+    const duration = Date.now() - startTime;
+    performanceMonitor.trackRequest(duration);
+
+    console.log(`[${requestId}] Successfully merged ${files.length} files in ${duration}ms`);
     
-    const mergedBuffer = new Uint8Array(mergedPdfBytes);
-
-    // Cache the result
-    pdfCache.set(cacheKey, mergedBuffer);
-
-    console.log(`[${requestId}] Successfully merged ${files.length} files`);
-    return createStreamingResponse(mergedBuffer, `merged-${new Date().toISOString().slice(0, 10)}.pdf`);
+    // Return optimized streaming response
+    return new NextResponse(mergedPdfBytes, {
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="merged-${new Date().toISOString().slice(0, 10)}.pdf"`,
+        'Content-Length': mergedPdfBytes.length.toString(),
+        'Cache-Control': 'no-store'
+      }
+    });
 
   } catch (error) {
     console.error(`[${requestId}] Error:`, error);
-    return createErrorResponse(getErrorMessage(error));
+    return createErrorResponse(
+      error instanceof Error ? error.message : 'Failed to merge PDFs',
+      error instanceof Error && error.message.includes('timeout') ? 408 : 500
+    );
   } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-    if (abortController) {
-      abortController.abort();
-    }
+    if (timeoutId) clearTimeout(timeoutId);
+    if (abortController) abortController.abort();
   }
 } 
