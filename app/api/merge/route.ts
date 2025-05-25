@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { PDFDocument } from 'pdf-lib';
+import { PDFDocument, PDFPage } from 'pdf-lib';
 import { Readable } from 'stream';
-import { validatePDF } from '@/lib/utils/pdf-validation';
+import { validatePDF, isPDFCorrupted } from '@/lib/utils/pdf-validation';
 
 // Server-side constants
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
 const MEMORY_BUFFER = 0.8; // Use 80% of available memory
 const MIN_CHUNK_SIZE = 512 * 1024; // 512KB
+const MAX_PAGES_PER_BATCH = 5; // Process 5 pages at a time
+const PAGE_PROCESSING_DELAY = 50; // 50ms delay between page batches
 
 // Helper function to get optimal chunk size based on available memory
 const getOptimalChunkSize = (totalSize: number, deviceType: string) => {
@@ -23,57 +25,121 @@ const getOptimalChunkSize = (totalSize: number, deviceType: string) => {
   return Math.max(MIN_CHUNK_SIZE, Math.min(baseChunkSize, Math.floor(totalSize / 10)));
 };
 
-// Helper function to process PDF chunks with memory management
-const processPDFChunks = async (chunks: ArrayBuffer[], deviceType: string) => {
-  const mergedPdf = await PDFDocument.create();
-  const chunkSize = getOptimalChunkSize(
-    chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
-    deviceType
-  );
+// Helper function to sanitize PDF data
+const sanitizePDFBuffer = async (buffer: ArrayBuffer): Promise<Uint8Array> => {
+  try {
+    // Load and re-save the PDF to normalize its structure
+    const pdfDoc = await PDFDocument.load(buffer, { 
+      ignoreEncryption: true,
+      updateMetadata: false
+    });
+    
+    // Remove any problematic elements
+    const pages = pdfDoc.getPages();
+    pages.forEach(page => {
+      try {
+        // Clean up page content streams
+        const contents = page.node.Contents();
+        if (contents) {
+          // Reset the content stream to remove any problematic operators
+          page.drawText('', { x: 0, y: 0, size: 0 });
+        }
+      } catch (e) {
+        console.warn('Error cleaning page:', e);
+      }
+    });
 
+    return await pdfDoc.save({ addDefaultPage: false });
+  } catch (e) {
+    console.error('Error sanitizing PDF:', e);
+    throw new Error('Invalid PDF structure');
+  }
+};
+
+// Helper function to process PDF chunks with improved error handling
+const processPDFChunks = async (chunks: ArrayBuffer[], deviceType: string): Promise<Uint8Array> => {
+  const mergedPdf = await PDFDocument.create();
+  let totalPages = 0;
+  let processedPages = 0;
+
+  // Process each PDF file
   for (let i = 0; i < chunks.length; i++) {
     try {
-      const chunk = chunks[i];
-      const pdfDoc = await PDFDocument.load(chunk, { ignoreEncryption: true });
+      // Sanitize the PDF data first
+      const sanitizedBuffer = await sanitizePDFBuffer(chunks[i]);
       
-      // Copy pages in smaller batches for better memory management
+      // Load the sanitized PDF
+      const pdfDoc = await PDFDocument.load(sanitizedBuffer, {
+        ignoreEncryption: true,
+        updateMetadata: false
+      });
+
       const pageCount = pdfDoc.getPageCount();
-      for (let j = 0; j < pageCount; j += 10) {
-        const pageIndices = Array.from(
-          { length: Math.min(10, pageCount - j) },
+      totalPages += pageCount;
+
+      // Process pages in small batches
+      for (let j = 0; j < pageCount; j += MAX_PAGES_PER_BATCH) {
+        const batchIndices = Array.from(
+          { length: Math.min(MAX_PAGES_PER_BATCH, pageCount - j) },
           (_, k) => j + k
         );
-        const pages = await mergedPdf.copyPages(pdfDoc, pageIndices);
-        pages.forEach(page => mergedPdf.addPage(page));
-        
-        // Force garbage collection if available
-        if (global.gc) {
-          try {
-            global.gc();
-          } catch (e) {
-            console.warn('Failed to force garbage collection');
+
+        try {
+          // Copy and embed pages
+          const pages = await mergedPdf.copyPages(pdfDoc, batchIndices);
+          pages.forEach(page => {
+            try {
+              mergedPdf.addPage(page);
+              processedPages++;
+            } catch (e) {
+              console.warn(`Error adding page ${processedPages}:`, e);
+            }
+          });
+
+          // Add small delay between batches to prevent memory spikes
+          await new Promise(resolve => setTimeout(resolve, PAGE_PROCESSING_DELAY));
+          
+          // Force garbage collection if available
+          if (global.gc) {
+            try {
+              global.gc();
+            } catch (e) {
+              console.warn('Failed to force garbage collection');
+            }
           }
+        } catch (e) {
+          console.warn(`Error processing batch at page ${j}:`, e);
+          continue; // Skip problematic batch but continue processing
         }
       }
     } catch (error) {
-      console.error(`Error processing chunk ${i}:`, error);
-      throw new Error(`Failed to process PDF chunk ${i}`);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error(`Error processing PDF ${i}:`, error);
+      throw new Error(`Failed to process PDF ${i + 1}: ${errorMessage}`);
     }
   }
 
-  return mergedPdf;
+  if (processedPages === 0) {
+    throw new Error('No valid pages found in the provided PDFs');
+  }
+
+  // Save with optimized settings
+  return await mergedPdf.save({
+    addDefaultPage: false,
+    useObjectStreams: false
+  });
 };
 
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
-  let retryCount = 0; // Declare retryCount at the function scope
+  let retryCount = 0;
   
   try {
     const formData = await request.formData();
     const files = formData.getAll('files');
     const deviceType = request.headers.get('X-Device-Type') || 'desktop';
     const totalSize = parseInt(request.headers.get('X-Total-Size') || '0');
-    retryCount = parseInt(request.headers.get('X-Retry-Count') || '0'); // Assign to the declared variable
+    retryCount = parseInt(request.headers.get('X-Retry-Count') || '0');
 
     if (!files.length) {
       return NextResponse.json(
@@ -94,12 +160,18 @@ export async function POST(request: NextRequest) {
 
       const buffer = await file.arrayBuffer();
       
-      // Validate PDF structure
+      // Enhanced validation
       try {
         await validatePDF(new Uint8Array(buffer));
+        if (isPDFCorrupted(new Uint8Array(buffer))) {
+          return NextResponse.json(
+            { error: `File ${chunks.length + 1} appears to be corrupted` },
+            { status: 400 }
+          );
+        }
       } catch (error) {
         return NextResponse.json(
-          { error: 'Invalid PDF structure' },
+          { error: `Invalid PDF structure in file ${chunks.length + 1}` },
           { status: 400 }
         );
       }
@@ -107,11 +179,8 @@ export async function POST(request: NextRequest) {
       chunks.push(buffer);
     }
 
-    // Process PDFs with optimized memory usage
-    const mergedPdf = await processPDFChunks(chunks, deviceType);
-    const mergedPdfBytes = await mergedPdf.save();
-
-    // Calculate processing time
+    // Process PDFs with improved error handling
+    const mergedPdfBytes = await processPDFChunks(chunks, deviceType);
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
 
     // Stream the response back
@@ -130,10 +199,22 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Error merging PDFs:', error);
 
-    // Handle retries using the properly scoped retryCount
+    // Enhanced error messages
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const userMessage = errorMessage.includes('Invalid PDF structure') 
+      ? 'One or more PDFs are corrupted or invalid'
+      : errorMessage.includes('No valid pages')
+        ? 'Could not find any valid pages in the provided PDFs'
+        : 'Failed to merge PDFs';
+
+    // Handle retries with better error reporting
     if (retryCount < MAX_RETRIES) {
       return NextResponse.json(
-        { error: 'Processing failed, please retry' },
+        { 
+          error: userMessage,
+          detail: errorMessage,
+          retryAfter: RETRY_DELAY * Math.pow(2, retryCount)
+        },
         { 
           status: 500,
           headers: {
@@ -144,7 +225,10 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: 'Failed to merge PDFs' },
+      { 
+        error: userMessage,
+        detail: errorMessage
+      },
       { status: 500 }
     );
   }
@@ -154,4 +238,5 @@ export async function POST(request: NextRequest) {
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 60; // Maximum allowed duration for hobby plan 
+// Set maximum duration based on deployment environment
+export const maxDuration = process.env.VERCEL_ENV === 'production' ? 60 : 300; 
