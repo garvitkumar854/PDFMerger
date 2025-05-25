@@ -38,8 +38,8 @@ import { css } from "@emotion/react";
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per file
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
 const MAX_FILES = 20;
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 2000; // 2 seconds
+const MAX_RETRIES = 5;
+const RETRY_DELAY = 1000; // 1 second initial retry delay
 const UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks for upload
 const PARALLEL_UPLOADS = 3; // Number of parallel uploads
 const RETRY_ATTEMPTS = 3;
@@ -51,12 +51,21 @@ const NETWORK_ERRORS = [
   'offline'
 ];
 
+// Performance optimization constants
+const UPLOAD_TIMEOUT = 120000; // 120 seconds for upload
+const PROCESSING_TIMEOUT = 180000; // 180 seconds for processing
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks for better mobile handling
+const MAX_PARALLEL_CHUNKS = 3; // Maximum parallel chunk uploads
+const MIN_CHUNK_SIZE = 512 * 1024; // 512KB minimum chunk size
+const MEMORY_LIMIT = 50 * 1024 * 1024; // 50MB memory limit for processing
+
 interface FileItem {
   id: string;
   name: string;
   size: number;
   type: string;
   file: File;
+  arrayBuffer: () => Promise<ArrayBuffer>;
 }
 
 interface SortableFileItemProps {
@@ -340,6 +349,46 @@ const trackProgress = (
   });
 };
 
+// Add device detection
+const getDeviceType = () => {
+  const ua = navigator.userAgent;
+  if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) {
+    return 'tablet';
+  }
+  if (/Mobile|Android|iP(hone|od)|IEMobile|BlackBerry|Kindle|Silk-Accelerated|(hpw|web)OS|Opera M(obi|ini)/.test(ua)) {
+    return 'mobile';
+  }
+  return 'desktop';
+};
+
+// Add optimized chunk size calculation
+const calculateChunkSize = (fileSize: number, deviceType: string) => {
+  if (deviceType === 'mobile') {
+    // Smaller chunks for mobile devices
+    return Math.min(Math.max(MIN_CHUNK_SIZE, Math.floor(fileSize / 10)), CHUNK_SIZE);
+  }
+  return CHUNK_SIZE;
+};
+
+// Add memory management
+const checkMemoryUsage = async () => {
+  if ('memory' in performance) {
+    const memory = (performance as any).memory;
+    if (memory.usedJSHeapSize > MEMORY_LIMIT) {
+      // Force garbage collection if available
+      if ('gc' in window) {
+        try {
+          (window as any).gc();
+        } catch (e) {
+          console.warn('Failed to force garbage collection');
+        }
+      }
+      // Wait for memory to be freed
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+};
+
 export default function MergePDF() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isMerging, setIsMerging] = useState(false);
@@ -419,7 +468,8 @@ export default function MergePDF() {
         name: file.name,
         size: file.size,
         type: file.type,
-        file: file
+        file: file,
+        arrayBuffer: () => file.arrayBuffer()
       });
     }
 
@@ -491,17 +541,11 @@ export default function MergePDF() {
 
   // Add retry logic for merge operation
   const handleMerge = useCallback(async (retryCount = 0) => {
-    if (files.length < 2) {
-      toast({
-        title: "Error",
-        description: "Please select at least 2 PDF files to merge",
-        variant: "destructive",
-      });
-      return;
-    }
+    if (!files.length) return;
 
-    // Validate total size and file count before starting
-    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    const deviceType = getDeviceType();
+    const totalSize = files.reduce((acc, file) => acc + file.size, 0);
+
     if (totalSize > MAX_TOTAL_SIZE) {
       toast({
         title: "Error",
@@ -540,146 +584,183 @@ export default function MergePDF() {
       setMergedPdfUrl(null);
     }
 
-    // Create abort controller with extended timeout
-    abortControllerRef.current = new AbortController();
-    const { signal } = abortControllerRef.current;
+    let uploadController: AbortController | null = new AbortController();
+    let processingController: AbortController | null = new AbortController();
+    let uploadTimeout: NodeJS.Timeout | null = null;
+    let processingTimeout: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (uploadTimeout) clearTimeout(uploadTimeout);
+      if (processingTimeout) clearTimeout(processingTimeout);
+      if (uploadController) uploadController.abort();
+      if (processingController) processingController.abort();
+      uploadController = null;
+      processingController = null;
+      uploadTimeout = null;
+      processingTimeout = null;
+    };
 
     try {
-      // Process files in parallel
-      const formData = await processFilesInParallel(files, (state) => {
-        setMergeProgress(state.progress);
-        toast({
-          title: "Processing",
-          description: state.detail,
-          variant: "default",
-        });
+      // Process files in optimized chunks
+      const formData = new FormData();
+      let totalProcessed = 0;
+      
+      // Process files sequentially for better memory management
+      for (const file of files) {
+        const buffer = await file.arrayBuffer();
+        const optimizedChunkSize = calculateChunkSize(buffer.byteLength, deviceType);
+        const chunks = Math.ceil(buffer.byteLength / optimizedChunkSize);
+        
+        // Process chunks with memory management
+        for (let i = 0; i < chunks; i++) {
+          await checkMemoryUsage();
+          
+          const start = i * optimizedChunkSize;
+          const end = Math.min(start + optimizedChunkSize, buffer.byteLength);
+          const chunk = buffer.slice(start, end);
+          
+          const chunkBlob = new Blob([chunk], { type: 'application/pdf' });
+          formData.append('files', chunkBlob, `${file.name}.part${i}`);
+          
+          totalProcessed += chunk.byteLength;
+          setMergeProgress(Math.floor((totalProcessed / totalSize) * 30));
+          
+          // Free up memory
+          if (i % MAX_PARALLEL_CHUNKS === 0) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+        }
+      }
+
+      // Add device info to headers
+      const headers = {
+        "X-Request-ID": Math.random().toString(36).substring(7),
+        "X-Retry-Count": retryCount.toString(),
+        "X-Total-Size": totalSize.toString(),
+        "X-File-Count": files.length.toString(),
+        "X-Device-Type": deviceType,
+        "X-Chunk-Size": calculateChunkSize(totalSize, deviceType).toString()
+      };
+
+      // Start merge request with separate timeouts for upload and processing
+      setMergeProgress(30);
+      
+      // Set upload timeout
+      uploadTimeout = setTimeout(() => {
+        if (uploadController) {
+          uploadController.abort();
+          throw new Error('Upload timed out');
+        }
+      }, UPLOAD_TIMEOUT);
+
+      const response = await fetch("/api/merge", {
+        method: "POST",
+        body: formData,
+        signal: uploadController.signal,
+        headers: headers
       });
 
-      // Start merge request with retry logic
-      setMergeProgress(30);
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 55000); // 55-second timeout
+      // Clear upload timeout and controller
+      if (uploadTimeout) clearTimeout(uploadTimeout);
+      uploadController = null;
 
-      try {
-        const response = await fetch("/api/merge", {
-          method: "POST",
-          body: formData,
-          signal: controller.signal,
-          headers: {
-            "X-Request-ID": Math.random().toString(36).substring(7),
-            "X-Retry-Count": retryCount.toString()
-          }
-        });
-
-        clearTimeout(timeout);
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || "Failed to merge PDFs");
-        }
-
-        // Validate response headers
-        const contentType = response.headers.get('Content-Type');
-        if (!contentType?.includes('application/pdf')) {
-          throw new Error('Invalid response format');
-        }
-
-        // Get estimated size from headers
-        const estimatedSize = parseInt(response.headers.get('X-Estimated-Size') || '0');
-        
-        // Update progress to processing phase
-        setMergeProgress(60);
-        toast({
-          title: "Processing",
-          description: "Merging PDFs...",
-          variant: "default",
-        });
-
-        // Stream response with progress tracking and validation
-        const stream = await trackProgress(response, (state) => {
-          setMergeProgress(state.progress);
-          if (state.detail) {
-            toast({
-              title: state.phase === 'downloading' ? "Downloading" : "Processing",
-              description: state.detail,
-              variant: "default",
-            });
-          }
-        }, estimatedSize);
-
-        // Create and validate blob
-        const blob = await new Response(stream).blob();
-        
-        if (blob.size === 0) {
-          throw new Error("Generated PDF is empty");
-        }
-
-        // Validate PDF header
-        const arrayBuffer = await blob.arrayBuffer();
-        const header = new Uint8Array(arrayBuffer.slice(0, 5));
-        const isPDF = header[0] === 0x25 && // %
-                      header[1] === 0x50 && // P
-                      header[2] === 0x44 && // D
-                      header[3] === 0x46 && // F
-                      header[4] === 0x2D;   // -
-        
-        if (!isPDF) {
-          throw new Error("Invalid PDF format");
-        }
-
-        // Create URL and finish
-        const url = URL.createObjectURL(blob);
-        setMergedPdfUrl(url);
-        setMergeProgress(100);
-        setIsComplete(true);
-
-        const processingTime = response.headers.get('X-Processing-Time');
-        toast({
-          title: "Success!",
-          description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB) in ${processingTime}s`,
-          variant: "default",
-        });
-
-      } catch (error) {
-        clearTimeout(timeout);
-        throw error;
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to merge PDFs");
       }
+
+      // Set processing timeout
+      processingTimeout = setTimeout(() => {
+        if (processingController) {
+          processingController.abort();
+          throw new Error('Processing timed out');
+        }
+      }, PROCESSING_TIMEOUT);
+
+      // Optimize response handling for mobile
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Failed to get response reader");
+
+      const chunks: Uint8Array[] = [];
+      let receivedLength = 0;
+      const contentLength = parseInt(response.headers.get('Content-Length') || '0');
+
+      while (true) {
+        await checkMemoryUsage();
+        const { done, value } = await reader.read();
+        
+        if (done) break;
+        
+        chunks.push(value);
+        receivedLength += value.length;
+        
+        // Update progress with smoother updates
+        setMergeProgress(60 + Math.floor((receivedLength / contentLength) * 30));
+        
+        // Free up memory periodically
+        if (chunks.length % MAX_PARALLEL_CHUNKS === 0) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
+
+      // Combine chunks and create blob
+      const blob = new Blob(chunks, { type: 'application/pdf' });
+      
+      if (blob.size === 0) {
+        throw new Error("Generated PDF is empty");
+      }
+
+      // Create URL and finish
+      const url = URL.createObjectURL(blob);
+      setMergedPdfUrl(url);
+      setMergeProgress(100);
+      setIsComplete(true);
+
+      const processingTime = response.headers.get('X-Processing-Time');
+      toast({
+        title: "Success!",
+        description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB) in ${processingTime}s`,
+        variant: "default",
+      });
 
     } catch (error) {
       console.error("Error merging PDFs:", error);
-
+      
       const errorMessage = error instanceof Error ? error.message.toLowerCase() : '';
-      const shouldRetry = retryCount < RETRY_ATTEMPTS && 
-        (NETWORK_ERRORS.some(err => errorMessage.includes(err)) ||
-         errorMessage.includes('unexpected token') ||
-         errorMessage.includes('invalid pdf'));
+      const isTimeout = errorMessage.includes('timeout') || errorMessage.includes('aborted');
+      const isNetworkError = NETWORK_ERRORS.some(err => errorMessage.includes(err));
+      const isMemoryError = errorMessage.includes('memory') || errorMessage.includes('allocation failed');
 
-      if (shouldRetry) {
+      // Enhanced error handling
+      if ((isTimeout || isNetworkError || isMemoryError) && retryCount < MAX_RETRIES) {
+        const backoffDelay = RETRY_DELAY * Math.pow(2, retryCount);
+        
         toast({
           title: "Retrying...",
-          description: `Attempt ${retryCount + 1} of ${RETRY_ATTEMPTS}. Please wait...`,
+          description: `Attempt ${retryCount + 1} of ${MAX_RETRIES}. Please wait...`,
           variant: "default",
         });
 
-        // Exponential backoff
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * Math.pow(2, retryCount)));
+        // Clear memory before retry
+        await checkMemoryUsage();
+        
+        // Exponential backoff with jitter
+        await new Promise(resolve => 
+          setTimeout(resolve, backoffDelay + Math.random() * 1000)
+        );
+        
+        cleanup();
         return handleMerge(retryCount + 1);
       }
 
       let userErrorMessage = "Failed to merge PDFs. Please try again.";
 
-      if (error instanceof Error) {
-        if (error.message.toLowerCase().includes('timeout')) {
-          userErrorMessage = "Operation timed out. Try with fewer or smaller files.";
-        } else if (error.message.toLowerCase().includes('unexpected token')) {
-          userErrorMessage = "One or more PDFs appear to be corrupted. Please verify your files.";
-        } else if (error.message.toLowerCase().includes('network')) {
-          userErrorMessage = "Network error occurred. Please check your connection.";
-        } else if (error.message.toLowerCase().includes('invalid pdf')) {
-          userErrorMessage = "Invalid PDF format detected. Please verify your files.";
-        } else {
-          userErrorMessage = error.message;
-        }
+      if (isTimeout) {
+        userErrorMessage = "Operation timed out. Try with fewer or smaller files.";
+      } else if (errorMessage.includes('network')) {
+        userErrorMessage = "Network error occurred. Please check your connection.";
+      } else if (error instanceof Error) {
+        userErrorMessage = error.message;
       }
 
       toast({
@@ -697,10 +778,9 @@ export default function MergePDF() {
         setMergedPdfUrl(null);
       }
     } finally {
+      cleanup();
       setIsMerging(false);
-      if (abortControllerRef.current) {
-        abortControllerRef.current = null;
-      }
+      await checkMemoryUsage();
     }
   }, [files, mergedPdfUrl, toast]);
 

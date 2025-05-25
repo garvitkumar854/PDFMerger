@@ -1,197 +1,152 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { PDFService } from '@/lib/services/pdf-service';
-import { createHash } from "crypto";
+import { PDFDocument } from 'pdf-lib';
+import { Readable } from 'stream';
+import { validatePDF } from '@/lib/utils/pdf-validation';
 
-// Constants for file handling
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per file
-const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
-const MAX_PROCESSING_TIME = 55000; // 55 seconds to allow for cleanup
-const MAX_FILES = 20; // Maximum number of files
-const MIN_FILE_SIZE = 100; // 100 bytes minimum
+// Server-side constants
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000;
+const MEMORY_BUFFER = 0.8; // Use 80% of available memory
+const MIN_CHUNK_SIZE = 512 * 1024; // 512KB
 
-// Initialize PDF service
-const pdfService = PDFService.getInstance();
+// Helper function to get optimal chunk size based on available memory
+const getOptimalChunkSize = (totalSize: number, deviceType: string) => {
+  const availableMemory = process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE 
+    ? parseInt(process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE) * 1024 * 1024 * MEMORY_BUFFER
+    : 512 * 1024 * 1024; // Default to 512MB if not in Lambda
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  const startTime = Date.now();
-  const requestId = createHash('sha256').update(Date.now().toString()).digest('hex').slice(0, 8);
+  const baseChunkSize = Math.min(
+    Math.floor(availableMemory / 4), // Use at most 1/4 of available memory
+    deviceType === 'mobile' ? 2 * 1024 * 1024 : 5 * 1024 * 1024 // 2MB for mobile, 5MB for desktop
+  );
 
-  console.log(`[${requestId}] Starting new merge request`);
+  return Math.max(MIN_CHUNK_SIZE, Math.min(baseChunkSize, Math.floor(totalSize / 10)));
+};
 
-  try {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Operation timed out')), MAX_PROCESSING_TIME);
-    });
+// Helper function to process PDF chunks with memory management
+const processPDFChunks = async (chunks: ArrayBuffer[], deviceType: string) => {
+  const mergedPdf = await PDFDocument.create();
+  const chunkSize = getOptimalChunkSize(
+    chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0),
+    deviceType
+  );
 
-    const result = await Promise.race([
-      processRequest(request, requestId),
-      timeoutPromise
-    ]);
-
-    console.log(`[${requestId}] Request completed successfully in ${(Date.now() - startTime) / 1000}s`);
-    return result;
-  } catch (error) {
-    console.error(`[${requestId}] PDF merge error:`, error);
-    
-    let statusCode = 500;
-    let errorMessage = 'Failed to merge PDFs';
-
-    if (error instanceof Error) {
-      if (error.message === 'Operation timed out') {
-        statusCode = 408;
-        errorMessage = 'Processing took too long. Try with fewer or smaller files.';
-      } else if (error.message.includes('memory')) {
-        statusCode = 413;
-        errorMessage = 'Files too large to process. Try with smaller files.';
-      } else {
-        errorMessage = error.message;
-      }
-    }
-
-    return NextResponse.json(
-      { error: errorMessage },
-      { status: statusCode }
-    );
-  }
-}
-
-async function processRequest(request: NextRequest, requestId: string): Promise<NextResponse> {
-  const startTime = Date.now();
-
-  if (!request.headers.get('content-type')?.includes('multipart/form-data')) {
-    console.error(`[${requestId}] Invalid content type:`, request.headers.get('content-type'));
-    return NextResponse.json(
-      { error: 'Invalid request format. Must be multipart/form-data.' },
-      { status: 400 }
-    );
-  }
-
-  let formData: FormData;
-  try {
-    formData = await request.formData();
-  } catch (error) {
-    console.error(`[${requestId}] Failed to parse form data:`, error);
-    return NextResponse.json(
-      { error: 'Failed to parse request data. Please try again.' },
-      { status: 400 }
-    );
-  }
-
-  const files = formData.getAll('files') as File[];
-
-  // Basic validation
-  if (!files?.length) {
-    return NextResponse.json(
-      { error: 'No PDF files provided.' },
-      { status: 400 }
-    );
-  }
-
-  if (files.length === 1) {
-    return NextResponse.json(
-      { error: 'Please provide at least 2 PDF files to merge.' },
-      { status: 400 }
-    );
-  }
-
-  if (files.length > MAX_FILES) {
-    return NextResponse.json(
-      { error: `Maximum ${MAX_FILES} files allowed.` },
-      { status: 400 }
-    );
-  }
-
-  // Size validation
-  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-  console.log(`[${requestId}] Total size: ${(totalSize / (1024 * 1024)).toFixed(2)}MB`);
-
-  if (totalSize > MAX_TOTAL_SIZE) {
-    return NextResponse.json(
-      { error: `Total size exceeds ${MAX_TOTAL_SIZE / (1024 * 1024)}MB limit.` },
-      { status: 400 }
-    );
-  }
-
-  const oversizedFile = files.find(file => file.size > MAX_FILE_SIZE);
-  if (oversizedFile) {
-    return NextResponse.json(
-      { error: `File "${oversizedFile.name}" exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit.` },
-      { status: 400 }
-    );
-  }
-
-  const tooSmallFile = files.find(file => file.size < MIN_FILE_SIZE);
-  if (tooSmallFile) {
-    return NextResponse.json(
-      { error: `File "${tooSmallFile.name}" is too small to be a valid PDF.` },
-      { status: 400 }
-    );
-  }
-
-  try {
-    console.log(`[${requestId}] Starting merge of ${files.length} files`);
-
-    // Convert files to array buffers with progress tracking
-    const buffers: ArrayBuffer[] = [];
-    for (const [index, file] of files.entries()) {
-      console.log(`[${requestId}] Processing file ${index + 1}/${files.length}: ${file.name}`);
-      
-      try {
-        const buffer = await file.arrayBuffer();
-        
-        // Validate each PDF
-        console.log(`[${requestId}] Validating ${file.name}`);
-        const validation = await pdfService.validatePDF(buffer);
-        if (!validation.isValid) {
-          throw new Error(`Invalid PDF file "${file.name}": ${validation.error}`);
-        }
-
-        console.log(`[${requestId}] ${file.name} validated successfully`);
-        buffers.push(buffer);
-      } catch (error) {
-        console.error(`[${requestId}] Error processing ${file.name}:`, error);
-        throw new Error(`Failed to process "${file.name}": ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-    }
-
-    // Process PDFs with optimizations
-    console.log(`[${requestId}] Starting PDF merge process`);
-    const mergedPdfBytes = await pdfService.processPDFs(buffers, {
-      optimizeImages: true,
-      removeMetadata: true,
-      maxQuality: 0.92
-    });
-
-    const processingTime = (Date.now() - startTime) / 1000;
-    console.log(`[${requestId}] Merge completed in ${processingTime.toFixed(2)}s`);
-
-    // Return with appropriate headers for streaming
-    return new NextResponse(mergedPdfBytes, {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/pdf',
-        'Content-Disposition': 'attachment; filename=merged.pdf',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'Content-Length': mergedPdfBytes.byteLength.toString(),
-        'X-Processing-Time': processingTime.toString(),
-        'X-Estimated-Size': mergedPdfBytes.byteLength.toString(),
-        'X-Request-ID': requestId
-      },
-    });
-  } catch (error) {
-    console.error(`[${requestId}] Error processing files:`, error);
-    throw error; // Let the outer handler deal with the error
-  } finally {
-    // Cleanup resources
+  for (let i = 0; i < chunks.length; i++) {
     try {
-      if (global.gc) {
-        global.gc();
+      const chunk = chunks[i];
+      const pdfDoc = await PDFDocument.load(chunk, { ignoreEncryption: true });
+      
+      // Copy pages in smaller batches for better memory management
+      const pageCount = pdfDoc.getPageCount();
+      for (let j = 0; j < pageCount; j += 10) {
+        const pageIndices = Array.from(
+          { length: Math.min(10, pageCount - j) },
+          (_, k) => j + k
+        );
+        const pages = await mergedPdf.copyPages(pdfDoc, pageIndices);
+        pages.forEach(page => mergedPdf.addPage(page));
+        
+        // Force garbage collection if available
+        if (global.gc) {
+          try {
+            global.gc();
+          } catch (e) {
+            console.warn('Failed to force garbage collection');
+          }
+        }
       }
     } catch (error) {
-      console.warn(`[${requestId}] Failed to run garbage collection:`, error);
+      console.error(`Error processing chunk ${i}:`, error);
+      throw new Error(`Failed to process PDF chunk ${i}`);
     }
+  }
+
+  return mergedPdf;
+};
+
+export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+  let retryCount = 0; // Declare retryCount at the function scope
+  
+  try {
+    const formData = await request.formData();
+    const files = formData.getAll('files');
+    const deviceType = request.headers.get('X-Device-Type') || 'desktop';
+    const totalSize = parseInt(request.headers.get('X-Total-Size') || '0');
+    retryCount = parseInt(request.headers.get('X-Retry-Count') || '0'); // Assign to the declared variable
+
+    if (!files.length) {
+      return NextResponse.json(
+        { error: 'No files provided' },
+        { status: 400 }
+      );
+    }
+
+    // Validate and process files
+    const chunks: ArrayBuffer[] = [];
+    for (const file of files) {
+      if (!(file instanceof Blob)) {
+        return NextResponse.json(
+          { error: 'Invalid file format' },
+          { status: 400 }
+        );
+      }
+
+      const buffer = await file.arrayBuffer();
+      
+      // Validate PDF structure
+      try {
+        await validatePDF(new Uint8Array(buffer));
+      } catch (error) {
+        return NextResponse.json(
+          { error: 'Invalid PDF structure' },
+          { status: 400 }
+        );
+      }
+
+      chunks.push(buffer);
+    }
+
+    // Process PDFs with optimized memory usage
+    const mergedPdf = await processPDFChunks(chunks, deviceType);
+    const mergedPdfBytes = await mergedPdf.save();
+
+    // Calculate processing time
+    const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    // Stream the response back
+    const stream = new Readable();
+    stream.push(Buffer.from(mergedPdfBytes));
+    stream.push(null);
+
+    const response = new NextResponse(stream as any);
+    response.headers.set('Content-Type', 'application/pdf');
+    response.headers.set('Content-Length', mergedPdfBytes.length.toString());
+    response.headers.set('X-Processing-Time', processingTime);
+    response.headers.set('Cache-Control', 'no-cache');
+
+    return response;
+
+  } catch (error) {
+    console.error('Error merging PDFs:', error);
+
+    // Handle retries using the properly scoped retryCount
+    if (retryCount < MAX_RETRIES) {
+      return NextResponse.json(
+        { error: 'Processing failed, please retry' },
+        { 
+          status: 500,
+          headers: {
+            'Retry-After': (RETRY_DELAY * Math.pow(2, retryCount)).toString()
+          }
+        }
+      );
+    }
+
+    return NextResponse.json(
+      { error: 'Failed to merge PDFs' },
+      { status: 500 }
+    );
   }
 }
 

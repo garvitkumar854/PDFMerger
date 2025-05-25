@@ -85,4 +85,116 @@ export async function validatePDFStructure(file: File): Promise<{ isValid: boole
 export function clearValidationCache(): void {
   // WeakMap entries will be automatically garbage collected
   // when their key objects are no longer referenced
+}
+
+/**
+ * PDF validation utilities
+ */
+
+/**
+ * Validates a PDF file structure
+ * @param data PDF file data as Uint8Array
+ * @returns Promise that resolves if PDF is valid, rejects if invalid
+ */
+export async function validatePDF(data: Uint8Array): Promise<void> {
+  // Check PDF header
+  if (data.length < 5) {
+    throw new Error('File too small to be a valid PDF');
+  }
+
+  const header = String.fromCharCode(...data.slice(0, 5));
+  if (header !== '%PDF-') {
+    throw new Error('Invalid PDF header');
+  }
+
+  // Check for EOF marker
+  const tail = String.fromCharCode(...data.slice(-6));
+  if (!tail.includes('%%EOF')) {
+    throw new Error('Invalid PDF EOF marker');
+  }
+
+  // Check for xref table
+  const content = String.fromCharCode(...data);
+  if (!content.includes('xref')) {
+    throw new Error('Missing xref table');
+  }
+
+  // Basic structure validation passed
+  return Promise.resolve();
+}
+
+/**
+ * Checks if a PDF file might be corrupted
+ * @param data PDF file data
+ * @returns true if file appears corrupted
+ */
+export function isPDFCorrupted(data: Uint8Array): boolean {
+  try {
+    // Check for common corruption patterns
+    const content = String.fromCharCode(...data);
+    
+    // Check for truncated file
+    if (!content.includes('%%EOF')) {
+      return true;
+    }
+
+    // Check for missing objects
+    const objCount = (content.match(/\d+\s+\d+\s+obj/g) || []).length;
+    if (objCount === 0) {
+      return true;
+    }
+
+    // Check for broken xref
+    const xrefMatch = content.match(/xref\s+\d+\s+\d+/);
+    if (!xrefMatch) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    // If we can't even parse the content, consider it corrupted
+    return true;
+  }
+}
+
+/**
+ * Estimates the quality/integrity of a PDF file
+ * @param data PDF file data
+ * @returns score from 0-1 where 1 is highest quality
+ */
+export function getPDFQualityScore(data: Uint8Array): number {
+  try {
+    const content = String.fromCharCode(...data);
+    let score = 1.0;
+
+    // Check header quality
+    if (!content.startsWith('%PDF-1.')) {
+      score -= 0.3;
+    }
+
+    // Check EOF marker
+    if (!content.endsWith('%%EOF\n')) {
+      score -= 0.2;
+    }
+
+    // Check xref table
+    if (!content.includes('xref')) {
+      score -= 0.3;
+    }
+
+    // Check for linearization
+    if (!content.includes('/Linearized')) {
+      score -= 0.1;
+    }
+
+    // Check object structure
+    const objCount = (content.match(/\d+\s+\d+\s+obj/g) || []).length;
+    if (objCount < 10) {
+      score -= 0.1;
+    }
+
+    return Math.max(0, score);
+  } catch (error) {
+    return 0;
+  }
 } 
