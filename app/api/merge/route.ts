@@ -3,15 +3,21 @@ import { PDFDocument } from 'pdf-lib';
 import { createHash } from "crypto";
 
 // Constants adjusted for Vercel serverless limitations
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB per file
-const MAX_TOTAL_SIZE = 45 * 1024 * 1024; // 45MB total (Vercel limit is 50MB)
-const MAX_PROCESSING_TIME = 10000; // 10 seconds (Vercel has 10s timeout on hobby plan)
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for streaming
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB per file (reduced from 25MB)
+const MAX_TOTAL_SIZE = 40 * 1024 * 1024; // 40MB total (reduced from 45MB for safety)
+const MAX_PROCESSING_TIME = 9000; // 9 seconds (reduced from 10s for safety margin)
+const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB chunks for streaming (reduced from 5MB)
+const MAX_FILES = 10; // Maximum number of files
 
 // Enhanced PDF validation with more robust checks
 const validatePDF = async (buffer: ArrayBuffer): Promise<{ isValid: boolean; error?: string }> => {
   try {
-    // Check for absolute minimum file size (even smallest valid PDF should be at least 67 bytes)
+    // Memory optimization: Release buffer if too large
+    if (buffer.byteLength > MAX_FILE_SIZE) {
+      return { isValid: false, error: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit` };
+    }
+
+    // Check for absolute minimum file size
     if (buffer.byteLength < 67) {
       return { isValid: false, error: 'File is too small to be a valid PDF (minimum 67 bytes)' };
     }
@@ -30,13 +36,18 @@ const validatePDF = async (buffer: ArrayBuffer): Promise<{ isValid: boolean; err
       const pdfDoc = await PDFDocument.load(buffer, {
         updateMetadata: false,
         ignoreEncryption: true,
-        throwOnInvalidObject: false,
-        parseSpeed: 150, // Faster parsing
+        throwOnInvalidObject: true, // Changed to true for stricter validation
+        parseSpeed: 200, // Increased parsing speed
         capNumbers: true
       });
 
       if (!pdfDoc || pdfDoc.getPageCount() === 0) {
         return { isValid: false, error: 'Invalid PDF: No pages found' };
+      }
+
+      // Check for reasonable page count
+      if (pdfDoc.getPageCount() > 1000) {
+        return { isValid: false, error: 'PDF has too many pages (maximum 1000 pages)' };
       }
 
       return { isValid: true };
@@ -64,7 +75,7 @@ export async function POST(request: NextRequest): Promise<APIResponse> {
   const requestId = createHash('sha256').update(Date.now().toString()).digest('hex').slice(0, 8);
 
   try {
-    // Set up timeout
+    // Set up timeout with margin
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => {
         reject(new Error('Operation timed out'));
@@ -77,16 +88,31 @@ export async function POST(request: NextRequest): Promise<APIResponse> {
       timeoutPromise
     ]);
 
+    // Log processing time
+    const processingTime = Date.now() - startTime;
+    console.log(`[${requestId}] Processing completed in ${processingTime}ms`);
+
     return result;
   } catch (error) {
-    console.error('PDF merge error:', error);
+    console.error(`[${requestId}] PDF merge error:`, error);
+    
+    // Enhanced error messages
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const isTimeout = errorMessage === 'Operation timed out';
+    
     return NextResponse.json(
       { 
-        error: error instanceof Error && error.message === 'Operation timed out'
-          ? 'Operation timed out. Please try with fewer or smaller files.'
-          : 'Failed to merge PDFs. Please try again.'
+        error: isTimeout
+          ? 'Operation timed out. Please try with fewer or smaller files (max 20MB per file, 40MB total).'
+          : `Failed to merge PDFs: ${errorMessage}. Please ensure all files are valid PDFs.`
       },
-      { status: error instanceof Error && error.message === 'Operation timed out' ? 408 : 500 }
+      { 
+        status: isTimeout ? 408 : 500,
+        headers: {
+          'Cache-Control': 'no-store, must-revalidate',
+          'Pragma': 'no-cache'
+        }
+      }
     );
   }
 }
@@ -119,9 +145,9 @@ async function processRequest(request: NextRequest): Promise<APIResponse> {
     );
   }
 
-  if (files.length > 10) {
+  if (files.length > MAX_FILES) {
     return NextResponse.json(
-      { error: 'Maximum 10 files allowed.' },
+      { error: `Maximum ${MAX_FILES} files allowed.` },
       { status: 400 }
     );
   }
@@ -205,4 +231,4 @@ async function processRequest(request: NextRequest): Promise<APIResponse> {
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 10; // 10 seconds for Vercel hobby plan 
+export const maxDuration = 9; // 9 seconds for safety margin 

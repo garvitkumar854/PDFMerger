@@ -34,16 +34,19 @@ import { cn } from "@/lib/utils";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { css } from "@emotion/react";
 
-const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB
+// Constants must match server-side limits
+const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_TOTAL_SIZE = 40 * 1024 * 1024; // 40MB
 const MAX_FILES = 10;
+const MAX_RETRIES = 2;
+const RETRY_DELAY = 1000; // 1 second
 
 interface FileItem {
   id: string;
   name: string;
   size: number;
   type: string;
-  content: ArrayBuffer | null;
+  file: File;
 }
 
 interface SortableFileItemProps {
@@ -127,6 +130,11 @@ const SPRING_ANIMATION = {
   mass: 0.5
 };
 
+// Add type for API error response
+interface APIErrorResponse {
+  error: string;
+}
+
 // Update SortableFileItem component for better mobile handling
 const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   const {
@@ -202,7 +210,7 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
               "h-5 w-5 flex-shrink-0",
               isDragging ? "text-primary" : "text-primary/80"
             )} />
-            {file.content && (
+            {file.file && (
               <motion.div 
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
@@ -494,158 +502,64 @@ export default function MergePDF() {
   }, [mergedPdfUrl]);
 
   // Update handleFileUpload with improved validation and error handling
-  const handleFileUpload = useCallback(async (uploadedFiles: File[]) => {
+  const handleFileSelect = useCallback((files: File[]) => {
+    if (!files?.length) return;
+
     const newFiles: FileItem[] = [];
     const errors: string[] = [];
-    const processedFiles = new Set<string>();
 
-    // Show processing state
-    setIsMerging(true);
-
-    try {
-      // 1. First validate all files before processing
-      const validationResults = await Promise.all(
-        uploadedFiles.map(async (file) => ({
-          file,
-          validation: await validateFile(file)
-        }))
-      );
-
-      // 2. Check for validation errors
-      const invalidFiles = validationResults.filter(result => !result.validation.isValid);
-      if (invalidFiles.length > 0) {
-        invalidFiles.forEach(({ file, validation }) => {
-          errors.push(`${file.name}: ${validation.error}`);
-        });
-        throw new Error('Some files failed validation');
+    for (const file of files) {
+      if (!file.type.includes('pdf')) {
+        errors.push(`${file.name} is not a PDF file`);
+        continue;
       }
 
-      // 3. Process valid files
-      for (const { file } of validationResults) {
-        try {
-          // Skip if already processed
-          if (processedFiles.has(file.name)) {
-            console.log(`Skipping duplicate file: ${file.name}`);
-            continue;
-          }
-          processedFiles.add(file.name);
-
-          // Read file content
-          console.log(`Processing file: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)}MB)`);
-          const arrayBuffer = await file.arrayBuffer();
-          
-          if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-            throw new Error('Failed to read file content');
-          }
-
-          // Add to new files
-          newFiles.push({
-            id: crypto.randomUUID(),
-            name: file.name,
-            size: file.size,
-            type: file.type,
-            content: arrayBuffer
-          });
-
-          console.log(`Successfully processed: ${file.name}`);
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          console.error(`Error processing ${file.name}:`, errorMessage);
-          errors.push(`${file.name}: ${errorMessage}`);
-        }
+      if (file.size > MAX_FILE_SIZE) {
+        errors.push(`${file.name} exceeds ${(MAX_FILE_SIZE / (1024 * 1024)).toFixed(0)}MB limit`);
+        continue;
       }
 
-      // 4. Handle results
-      if (errors.length > 0) {
-        // Show errors but don't throw if we have some successful files
-        toast({
-          title: `${errors.length} File Processing Error${errors.length > 1 ? 's' : ''}`,
-          description: errors.join('\n'),
-          variant: "destructive",
-          duration: 5000, // Show for 5 seconds due to multiple lines
-        });
-      }
-
-      if (newFiles.length > 0) {
-        setFiles(prev => [...prev, ...newFiles]);
-        toast({
-          title: "Files Added Successfully",
-          description: `Added ${newFiles.length} file${newFiles.length === 1 ? '' : 's'} (${(newFiles.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)`,
-          variant: "default",
-        });
-      } else {
-        throw new Error('No files were successfully processed');
-      }
-    } catch (error) {
-      // Show error toast
-      const errorMessage = error instanceof Error ? error.message : 'Failed to process files';
-      toast({
-        title: "Error",
-        description: errors.length > 0 ? errors.join('\n') : errorMessage,
-        variant: "destructive",
-        duration: 5000, // Show for 5 seconds due to multiple lines
+      newFiles.push({
+        id: Math.random().toString(36).substring(7),
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        file: file
       });
-    } finally {
-      // Reset processing state
-      setIsMerging(false);
     }
-  }, [toast, setFiles]);
+
+    if (errors.length > 0) {
+      toast({
+        title: "Some files were not added",
+        description: errors.join('\n'),
+        variant: "destructive",
+        duration: 5000,
+      });
+    }
+
+    if (newFiles.length > 0) {
+      setFiles(prevFiles => [...prevFiles, ...newFiles]);
+    }
+  }, [toast]);
 
   const handleRemoveFile = useCallback((fileToRemove: FileItem) => {
-    // Clean up file resources
-    if (fileToRemove.content) {
-      fileToRemove.content = null;
-    }
-
-    // Clear processed files
-    clearProcessedFiles();
-
-    // Update files state
-    setFiles(prevFiles => {
-      const newFiles = prevFiles.filter(file => file.id !== fileToRemove.id);
-      
-      // Reset state if no files remain
-      if (newFiles.length === 0) {
-        if (mergedPdfUrl) {
-          URL.revokeObjectURL(mergedPdfUrl);
-          setMergedPdfUrl(null);
-        }
-        setIsComplete(false);
-        setMergeProgress(0);
-        setIsMerging(false);
+    setFiles(prevFiles => prevFiles.filter(f => f.id !== fileToRemove.id));
+    
+    // Reset progress and completion state if all files are removed
+    if (files.length <= 1) {
+      setMergeProgress(0);
+      setIsComplete(false);
+      if (mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+        setMergedPdfUrl(null);
       }
-      
-      return newFiles;
-    });
-
-    // Show removal notification
-    setTimeout(() => {
-      toast({
-        title: "File Removed",
-        description: `${fileToRemove.name} has been removed`,
-        variant: "default",
-      });
-    }, 0);
-
-    // Abort any ongoing operations
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
     }
-  }, [mergedPdfUrl, toast]);
+  }, [files.length, mergedPdfUrl]);
 
   const handleClearAll = useCallback(() => {
-    const fileCount = files.length;
-    if (fileCount === 0) return;
-
-    // Clean up files and clear processed files list
     setFiles([]);
-    clearProcessedFiles();
-
-    // Trigger FileUpload component reset
-    window.dispatchEvent(new Event('reset-file-upload'));
-
-    // Clean up other states
+    setMergeProgress(0);
+    setIsComplete(false);
     if (mergedPdfUrl) {
       URL.revokeObjectURL(mergedPdfUrl);
       setMergedPdfUrl(null);
@@ -654,20 +568,7 @@ export default function MergePDF() {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
-    
-    setIsMerging(false);
-    setMergeProgress(0);
-    setIsComplete(false);
-
-    // Show clear notification
-    setTimeout(() => {
-      toast({
-        title: "Files Cleared",
-        description: `Removed ${fileCount} file${fileCount === 1 ? '' : 's'}`,
-        variant: "default",
-      });
-    }, 0);
-  }, [files.length, mergedPdfUrl, toast]);
+  }, [mergedPdfUrl]);
 
   // Calculate remaining capacity
   const getRemainingCapacity = useCallback(() => {
@@ -695,113 +596,78 @@ export default function MergePDF() {
 
   // Add retry logic for merge operation
   const handleMerge = useCallback(async (retryCount = 0) => {
-    const MAX_RETRIES = 2;
-    
-    if (files.length === 0) {
-      toast({
-        title: "No files selected",
-        description: "Please select PDF files to merge",
-        variant: "destructive",
-      });
-      return;
-    }
-
     if (files.length < 2) {
       toast({
-        title: "Not enough files",
+        title: "Error",
         description: "Please select at least 2 PDF files to merge",
         variant: "destructive",
       });
       return;
     }
 
-    // Check total size
+    // Validate total size and file count before starting
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     if (totalSize > MAX_TOTAL_SIZE) {
       toast({
-        title: "Total size exceeded",
-        description: `Total size (${(totalSize / (1024 * 1024)).toFixed(1)}MB) exceeds the limit of ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB. Please remove some files.`,
+        title: "Error",
+        description: `Total size exceeds ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB limit`,
         variant: "destructive",
       });
       return;
     }
 
-    // Cancel any existing merge operation
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+    if (files.length > MAX_FILES) {
+      toast({
+        title: "Error",
+        description: `Maximum ${MAX_FILES} files allowed`,
+        variant: "destructive",
+      });
+      return;
     }
 
-    // Create new abort controller
+    // Check individual file sizes
+    const oversizedFile = files.find(file => file.size > MAX_FILE_SIZE);
+    if (oversizedFile) {
+      toast({
+        title: "Error",
+        description: `File "${oversizedFile.name}" exceeds ${(MAX_FILE_SIZE / (1024 * 1024)).toFixed(0)}MB limit`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsMerging(true);
+    setMergeProgress(0);
+
+    // Clear previous merged PDF URL
+    if (mergedPdfUrl) {
+      URL.revokeObjectURL(mergedPdfUrl);
+      setMergedPdfUrl(null);
+    }
+
+    // Create form data with optimized memory usage
+    const formData = new FormData();
+    files.forEach(fileItem => {
+      formData.append("files", fileItem.file);
+    });
+
+    // Add request ID for tracking
+    const requestId = Math.random().toString(36).substring(7);
+    const headers = {
+      "X-Request-ID": requestId,
+    };
+
+    // Create abort controller for timeout
     abortControllerRef.current = new AbortController();
+    const { signal } = abortControllerRef.current;
 
     try {
-      setIsMerging(true);
-      setMergeProgress(0);
-      setIsComplete(false);
-      if (mergedPdfUrl) {
-        URL.revokeObjectURL(mergedPdfUrl);
-        setMergedPdfUrl(null);
-      }
-
-      // Prepare form data with optimized chunk size
-      const formData = new FormData();
-      const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
-      
-      // Show initial progress
       setMergeProgress(10);
-
-      // Add files to form data with progress tracking and chunked upload
-      const totalFiles = files.length;
-      for (let i = 0; i < files.length; i++) {
-        const fileItem = files[i];
-        
-        try {
-          if (!fileItem.content) {
-            throw new Error(`Content missing for file: ${fileItem.name}`);
-          }
-
-          // Create a blob from the content with chunking
-          const chunks = [];
-          let offset = 0;
-          while (offset < fileItem.content.byteLength) {
-            chunks.push(fileItem.content.slice(offset, offset + CHUNK_SIZE));
-            offset += CHUNK_SIZE;
-          }
-
-          // Combine chunks and verify PDF
-          const blob = new Blob(chunks, { type: 'application/pdf' });
-          
-          // Verify PDF structure
-          const validation = await validatePDF(new File([blob], fileItem.name, { type: 'application/pdf' }));
-          if (!validation.isValid) {
-            throw new Error(`Invalid PDF: ${validation.error}`);
-          }
-
-          // Add to form data
-          formData.append("files", new File([blob], fileItem.name, { type: 'application/pdf' }));
-          
-          // Update progress (10-50%)
-          setMergeProgress(10 + Math.floor((i + 1) / totalFiles * 40));
-
-          // Clear chunk memory
-          chunks.length = 0;
-        } catch (error) {
-          throw new Error(`Error processing ${fileItem.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-      }
-
-      // Set optimized headers for better performance
-      const headers = new Headers({
-        'Accept': 'application/pdf',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-      });
 
       // Start merge request with timeout
       setMergeProgress(50);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+      const timeout = setTimeout(() => controller.abort(), 15000); // 15s client timeout
 
       try {
         const response = await fetch("/api/merge", {
@@ -814,7 +680,7 @@ export default function MergePDF() {
         clearTimeout(timeout);
 
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ error: 'Failed to merge PDFs' }));
+          const errorData = await response.json() as APIErrorResponse;
           throw new Error(errorData.error || "Failed to merge PDFs");
         }
 
@@ -851,12 +717,6 @@ export default function MergePDF() {
           throw new Error("Generated PDF is empty");
         }
 
-        // Verify merged PDF
-        const validation = await validatePDF(new File([blob], 'merged.pdf', { type: 'application/pdf' }));
-        if (!validation.isValid) {
-          throw new Error("Generated PDF is corrupted");
-        }
-
         // Create URL and finish
         const url = URL.createObjectURL(blob);
         setMergedPdfUrl(url);
@@ -877,15 +737,20 @@ export default function MergePDF() {
     } catch (error) {
       console.error("Error merging PDFs:", error);
       
-      // Implement retry logic
-      if (retryCount < MAX_RETRIES) {
+      // Implement retry logic for specific errors
+      if (retryCount < MAX_RETRIES && 
+          error instanceof Error && 
+          (error.message.includes("timeout") || 
+           error.message.includes("network") ||
+           error.message.includes("failed to fetch"))) {
+        
         toast({
           title: "Retrying...",
           description: `Attempt ${retryCount + 1} of ${MAX_RETRIES}`,
           variant: "default",
         });
         
-        await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (retryCount + 1)));
         return handleMerge(retryCount + 1);
       }
       
@@ -893,7 +758,7 @@ export default function MergePDF() {
       
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "Operation timed out. Please try again.";
+          errorMessage = "Operation timed out. Please try with fewer or smaller files.";
         } else {
           errorMessage = error.message;
         }
@@ -1036,7 +901,7 @@ export default function MergePDF() {
                 <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-lg sm:rounded-xl blur-xl" />
                 <div className="relative">
                   <FileUpload
-                    onFilesSelected={handleFileUpload}
+                    onFilesSelected={handleFileSelect}
                     maxFiles={MAX_FILES}
                     currentTotalSize={files.reduce((sum, file) => sum + file.size, 0)}
                     currentFileCount={files.length}
