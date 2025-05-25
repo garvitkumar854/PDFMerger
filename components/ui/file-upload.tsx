@@ -154,7 +154,7 @@ export function FileUpload({
             transform: 'none'
           }}
           className={cn(
-            "relative overflow-hidden rounded-xl border-2 group/upload p-[14px]",
+            "relative overflow-hidden rounded-lg sm:rounded-xl border-2 group/upload p-2 sm:p-[14px]",
             isDragActive 
               ? "border-primary bg-primary/5" 
               : "border-muted/40",
@@ -165,7 +165,7 @@ export function FileUpload({
           {/* Inner dotted border - Only show on hover */}
           <div className={cn(
             "absolute rounded-lg border-[2px] border-dashed",
-            "inset-[14px]",
+            "inset-2 sm:inset-[14px]",
             isDragActive 
               ? "border-primary opacity-100 scale-100" 
               : "border-blue-500/60 opacity-0 scale-95 group-hover/upload:scale-100 group-hover/upload:opacity-100",
@@ -173,10 +173,10 @@ export function FileUpload({
           )} />
 
           {/* Content wrapper */}
-          <div className="relative px-7 py-9">
+          <div className="relative px-4 sm:px-7 py-6 sm:py-9">
             <input {...getInputProps()} />
             
-            <div className="relative flex flex-col items-center justify-center gap-8">
+            <div className="relative flex flex-col items-center justify-center gap-5 sm:gap-8">
               {/* Icon with animation */}
               <motion.div
                 initial={false}
@@ -193,7 +193,7 @@ export function FileUpload({
                 className="relative transform-gpu"
               >
                 <Cloud className={cn(
-                  "h-16 w-16",
+                  "h-12 w-12 sm:h-16 sm:w-16",
                   isDragActive 
                     ? "text-primary" 
                     : "text-muted-foreground group-hover/upload:text-primary/80",
@@ -213,7 +213,7 @@ export function FileUpload({
                   damping: 30,
                   mass: 0.5
                 }}
-                className="text-center space-y-4 transform-gpu"
+                className="text-center space-y-3 sm:space-y-4 transform-gpu"
               >
                 <AnimatePresence mode="wait">
                   <motion.p
@@ -225,26 +225,26 @@ export function FileUpload({
                       duration: 0.2,
                       ease: "easeOut"
                     }}
-                    className="text-lg font-medium bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent transform-gpu"
+                    className="text-base sm:text-lg font-medium bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent transform-gpu"
                   >
                     {customText?.main || (
                       isValidating ? "Validating files..." :
                       isDragActive ? "Drop to add files..." :
-                      "Drop PDF files here or click to browse"
+                      "Drop PDFs here or tap to browse"
                     )}
                   </motion.p>
                 </AnimatePresence>
 
-                <p className="text-sm text-muted-foreground transition-opacity duration-200 ease-out">
+                <p className="text-xs sm:text-sm text-muted-foreground transition-opacity duration-200 ease-out">
                   {customText?.details}
                 </p>
 
                 {/* File type indicators */}
-                <div className="flex items-center justify-center gap-2 pt-1">
-                  <div className="px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium transition-transform duration-200 ease-out hover:scale-105">
+                <div className="flex items-center justify-center gap-2">
+                  <div className="px-2 sm:px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium transition-transform duration-200 ease-out hover:scale-105">
                     PDF Files
                   </div>
-                  <div className="px-3 py-1 rounded-full bg-muted/50 text-muted-foreground text-xs transition-transform duration-200 ease-out hover:scale-105">
+                  <div className="px-2 sm:px-3 py-1 rounded-full bg-muted/50 text-muted-foreground text-xs transition-transform duration-200 ease-out hover:scale-105">
                     Max {maxFiles} files
                   </div>
                 </div>

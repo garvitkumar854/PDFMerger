@@ -626,17 +626,20 @@ export default function MergePDF() {
       variants={containerVariants}
       className="min-h-screen bg-gradient-to-b from-background to-background/80"
     >
-      <div className="container mx-auto py-4 sm:py-6 lg:py-6 px-4 sm:px-6 lg:max-w-4xl xl:max-w-5xl">
-        <motion.div variants={itemVariants} className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-6 sm:mb-8">
+      <div className="container mx-auto py-3 sm:py-6 px-3 sm:px-6 lg:max-w-4xl xl:max-w-5xl">
+        <motion.div 
+          variants={itemVariants} 
+          className="flex flex-col sm:flex-row items-center justify-between gap-3 mb-4 sm:mb-8"
+        >
           <Link 
             href="/" 
-            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-all duration-200 ease-out rounded-lg px-3 py-1.5 hover:bg-primary/5 w-full sm:w-auto justify-center sm:justify-start"
+            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-all duration-200 ease-out rounded-lg px-2.5 py-1.5 hover:bg-primary/5 w-full sm:w-auto justify-center sm:justify-start text-sm sm:text-base"
           >
             <ArrowLeft className="h-4 w-4" />
             Back to Home
           </Link>
           <motion.h1 
-            className="text-2xl sm:text-3xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent text-center sm:text-left"
+            className="text-xl sm:text-3xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent text-center sm:text-left"
           >
             Merge PDFs
           </motion.h1>
@@ -647,16 +650,16 @@ export default function MergePDF() {
             <motion.div
               key="upload"
               variants={itemVariants}
-              className="space-y-4 lg:space-y-6"
+              className="space-y-3 sm:space-y-4 lg:space-y-6"
             >
               <div className="relative">
-                <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-xl blur-xl" />
+                <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-lg sm:rounded-xl blur-xl" />
                 <div className="relative">
                   <FileUpload
                     onFilesSelected={handleFilesSelected}
                     maxFiles={MAX_FILES}
                     acceptedFileTypes={["application/pdf"]}
-                    className="bg-card/95 shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[250px] lg:min-h-[300px] backdrop-blur-sm transition-all duration-300"
+                    className="bg-card/95 shadow-lg rounded-lg sm:rounded-xl border-primary/20 min-h-[180px] sm:min-h-[250px] backdrop-blur-sm transition-all duration-300"
                     hideFileList={true}
                     currentTotalSize={files.reduce((sum, file) => sum + file.size, 0)}
                     currentFileCount={files.length}
@@ -669,14 +672,14 @@ export default function MergePDF() {
                     }}
                     customText={{
                       main: files.length === 0 
-                        ? "Drop your PDF files here or click to browse" 
-                        : "Drop more PDF files here or click to browse",
+                        ? "Drop PDFs here or tap to browse" 
+                        : "Add more PDFs here",
                       details: (() => {
-                        const { totalSize, remainingSize, totalFiles, remainingFiles } = getRemainingCapacity();
+                        const { totalSize, remainingSize, totalFiles } = getRemainingCapacity();
                         if (files.length === 0) {
-                          return `Upload up to ${MAX_FILES} PDF files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB total)`;
+                          return `Up to ${MAX_FILES} files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB)`;
                         }
-                        return `${totalFiles}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used, ${(remainingSize / (1024 * 1024)).toFixed(1)}MB remaining)`;
+                        return `${totalFiles}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used)`;
                       })()
                     }}
                   />
@@ -684,24 +687,24 @@ export default function MergePDF() {
               </div>
 
               {files.length > 0 && (
-                <div className="space-y-4 bg-card/95 p-4 sm:p-5 lg:p-6 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm transition-all duration-300">
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                    <div className="space-y-1 w-full sm:w-auto">
-                      <h2 className="text-base sm:text-lg font-semibold text-foreground flex items-center gap-2">
+                <div className="space-y-3 bg-card/95 p-3 sm:p-5 rounded-lg sm:rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm transition-all duration-300">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                    <div className="space-y-0.5 w-full sm:w-auto">
+                      <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
                         Selected Files
-                        <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-2 py-0.5 text-xs sm:text-sm font-medium text-primary">
+                        <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
                           {files.length}
                         </span>
                       </h2>
-                      <p className="text-xs sm:text-sm text-muted-foreground">
-                        {files.length} file{files.length !== 1 ? 's' : ''} selected ({(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)
+                      <p className="text-xs text-muted-foreground">
+                        {(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total
                       </p>
                     </div>
                     <Button
                       variant="ghost"
                       size="sm"
                       onClick={handleClearAll}
-                      className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto text-xs sm:text-sm"
+                      className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto text-xs"
                     >
                       Clear All
                     </Button>
@@ -717,7 +720,7 @@ export default function MergePDF() {
                       strategy={verticalListSortingStrategy}
                     >
                       <AnimatePresence mode="popLayout">
-                        <div className="space-y-1.5 max-h-[200px] lg:max-h-[250px] overflow-y-auto custom-scrollbar">
+                        <div className="space-y-1.5 max-h-[160px] sm:max-h-[250px] overflow-y-auto custom-scrollbar">
                           {files.map((file) => (
                             <SortableFileItem
                               key={file.id}
@@ -731,46 +734,46 @@ export default function MergePDF() {
                   </DndContext>
 
                   {files.length >= 2 ? (
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                       <Button
                         onClick={handleMerge}
                         disabled={isMerging || isOverLimit().isOverLimit}
                         className={cn(
-                          "w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-4 lg:py-5 text-base sm:text-lg",
+                          "w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-3 sm:py-4 text-sm sm:text-base",
                           isOverLimit().isOverLimit && "opacity-50 cursor-not-allowed"
                         )}
                       >
                         {isMerging ? (
                           <>
-                            <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+                            <Upload className="mr-2 h-4 w-4 animate-spin" />
                             Merging...
                           </>
                         ) : isOverLimit().isOverLimit ? (
                           <>
-                            <AlertCircle className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
+                            <AlertCircle className="mr-2 h-4 w-4" />
                             {isOverLimit().reason}
                           </>
                         ) : (
                           <>
-                            <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
-                            Merge PDFs ({files.length} files)
+                            <CheckCircle2 className="mr-2 h-4 w-4" />
+                            Merge {files.length} PDFs
                           </>
                         )}
                       </Button>
 
                       {isMerging && (
-                        <div className="space-y-2">
-                          <Progress value={mergeProgress} className="h-2" />
-                          <p className="text-sm text-muted-foreground text-center">
+                        <div className="space-y-1.5">
+                          <Progress value={mergeProgress} className="h-1.5" />
+                          <p className="text-xs text-muted-foreground text-center">
                             Processing... {Math.round(mergeProgress)}%
                           </p>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-lg p-3">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/50 rounded-lg p-2.5">
                       <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                      Add at least one more PDF file to merge
+                      Add one more PDF to merge
                     </div>
                   )}
                 </div>
@@ -782,46 +785,41 @@ export default function MergePDF() {
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
-              className="bg-card/95 p-6 lg:p-8 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm text-center"
+              transition={SPRING_ANIMATION}
+              className="bg-card/95 p-4 sm:p-8 rounded-lg sm:rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm text-center"
             >
               <motion.div
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
-                transition={{ 
-                  type: "spring",
-                  stiffness: 500,
-                  damping: 30,
-                  delay: 0.1
-                }}
-                className="rounded-full bg-primary/10 p-3 lg:p-4 w-fit mx-auto mb-5"
+                transition={{ ...SPRING_ANIMATION, delay: 0.1 }}
+                className="rounded-full bg-primary/10 p-3 w-fit mx-auto mb-4"
               >
-                <CheckCircle2 className="h-8 w-8 lg:h-10 lg:w-10 text-primary" />
+                <CheckCircle2 className="h-7 w-7 sm:h-10 sm:w-10 text-primary" />
               </motion.div>
               
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.2, delay: 0.2 }}
+                transition={{ ...SPRING_ANIMATION, delay: 0.2 }}
               >
-                <h2 className="text-xl lg:text-2xl font-semibold text-foreground mb-2">PDF Merged Successfully!</h2>
-                <p className="text-muted-foreground mb-6 lg:mb-8">
+                <h2 className="text-lg sm:text-2xl font-semibold text-foreground mb-1.5">PDF Merged Successfully!</h2>
+                <p className="text-sm text-muted-foreground mb-5 sm:mb-8">
                   Your files have been combined into a single PDF
                 </p>
               </motion.div>
                 
-              <div className="flex flex-col gap-3 max-w-sm mx-auto">
+              <div className="flex flex-col gap-2 sm:gap-3 max-w-sm mx-auto">
                 <motion.div
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.2, delay: 0.3 }}
+                  transition={{ ...SPRING_ANIMATION, delay: 0.3 }}
                 >
                   <Button
                     onClick={handleDownload}
                     size="lg"
-                    className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-4 lg:py-5 text-base lg:text-lg transition-all duration-200 ease-out transform-gpu hover:scale-[1.02]"
+                    className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-3 sm:py-4 text-sm sm:text-lg transition-all duration-200 ease-out transform-gpu hover:scale-[1.02]"
                   >
-                    <Download className="h-5 w-5" />
+                    <Download className="h-4 w-4 sm:h-5 sm:w-5" />
                     Download PDF
                   </Button>
                 </motion.div>
@@ -829,15 +827,15 @@ export default function MergePDF() {
                 <motion.div
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.2, delay: 0.4 }}
+                  transition={{ ...SPRING_ANIMATION, delay: 0.4 }}
                 >
                   <Button
                     onClick={handleClearAll}
                     variant="outline"
                     size="lg"
-                    className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-4 lg:py-5 text-base lg:text-lg transition-all duration-200 ease-out transform-gpu hover:scale-[1.02]"
+                    className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-3 sm:py-4 text-sm sm:text-lg transition-all duration-200 ease-out transform-gpu hover:scale-[1.02]"
                   >
-                    <Plus className="h-5 w-5" />
+                    <Plus className="h-4 w-4 sm:h-5 sm:w-5" />
                     Merge More PDFs
                   </Button>
                 </motion.div>
