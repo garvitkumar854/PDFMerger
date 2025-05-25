@@ -32,6 +32,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
+import { css } from "@emotion/react";
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB
@@ -48,6 +49,11 @@ interface FileItem {
 interface SortableFileItemProps {
   file: FileItem;
   onRemove: (file: FileItem) => void;
+}
+
+interface ValidationResult {
+  isValid: boolean;
+  error?: string;
 }
 
 // Animation variants
@@ -121,7 +127,7 @@ const SPRING_ANIMATION = {
   mass: 0.5
 };
 
-// Update SortableFileItem component for better touch handling
+// Update SortableFileItem component for better mobile handling
 const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   const {
     attributes,
@@ -143,12 +149,13 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
     transform: CSS.Transform.toString(transform),
     transition,
     position: 'relative' as const,
-    touchAction: 'none',
+    touchAction: 'manipulation',
     willChange: 'transform',
     userSelect: 'none' as const,
     WebkitUserSelect: 'none' as const,
+    WebkitTouchCallout: 'none' as const,
     WebkitTapHighlightColor: 'transparent',
-    WebkitTouchCallout: 'none' as const
+    zIndex: isDragging ? 999 : 1,
   };
 
   return (
@@ -161,20 +168,19 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
       exit="exit"
       layoutId={file.id}
       className={cn(
-        "flex items-center justify-between p-3 rounded-lg border",
+        "flex items-center justify-between p-3 rounded-lg border bg-background/50",
         "touch-none select-none will-change-transform",
-        "active:cursor-grabbing",
         isDragging ? 
-          "border-primary shadow-lg bg-background z-10" : 
+          "border-primary shadow-lg bg-background z-50 !scale-105" : 
           "hover:bg-primary/5 hover:border-primary/20",
-        over ? "opacity-60 scale-[0.98] transition-all duration-200" : ""
+        over ? "opacity-50 scale-95 transition-all duration-200" : ""
       )}
     >
       <div 
         className={cn(
           "flex items-center gap-3 flex-1 min-w-0",
-          "cursor-grab active:cursor-grabbing",
-          "touch-pan-y"
+          "touch-none select-none",
+          isDragging ? "cursor-grabbing" : "cursor-grab"
         )}
         {...attributes} 
         {...listeners}
@@ -350,7 +356,7 @@ const validatePDFHeader = async (file: File): Promise<boolean> => {
 const validatedFiles = new WeakMap<File, boolean>();
 
 // Add helper function for file validation
-const validateFile = async (file: File): Promise<{ isValid: boolean; error?: string }> => {
+const validateFile = async (file: File): Promise<ValidationResult> => {
   try {
     // 1. Basic file checks
     if (!file) {
@@ -400,6 +406,37 @@ const validateFile = async (file: File): Promise<{ isValid: boolean; error?: str
   }
 };
 
+// Add optimized worker pool size based on device capabilities
+const optimizeWorkerPoolSize = () => {
+  const cpuCores = navigator.hardwareConcurrency || 4;
+  return Math.max(2, Math.min(cpuCores - 1, 4)); // Keep 1 core free for UI
+};
+
+// Enhanced PDF validation with version check
+const validatePDF = async (file: File): Promise<ValidationResult> => {
+  // Add signature validation
+  const header = await file.slice(0, 5).arrayBuffer();
+  const view = new Uint8Array(header);
+  const hasValidSignature = view[0] === 0x25 && // %
+                           view[1] === 0x50 && // P
+                           view[2] === 0x44 && // D
+                           view[3] === 0x46 && // F
+                           view[4] === 0x2D;   // -
+  
+  if (!hasValidSignature) {
+    return { isValid: false, error: 'Invalid PDF format' };
+  }
+  
+  // Add version check
+  const versionBytes = await file.slice(5, 8).arrayBuffer();
+  const version = new TextDecoder().decode(versionBytes);
+  if (!version.match(/^[0-9]\.[0-9]$/)) {
+    return { isValid: false, error: 'Unsupported PDF version' };
+  }
+  
+  return { isValid: true };
+};
+
 export default function MergePDF() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isMerging, setIsMerging] = useState(false);
@@ -411,20 +448,19 @@ export default function MergePDF() {
   const { isLoaded, userId } = useAuth();
   const router = useRouter();
 
-  // Update sensors configuration for better mobile handling
+  // Move sensors configuration inside the component
   const sensors = useSensors(
     useSensor(TouchSensor, {
-      // Activate immediately on touch
       activationConstraint: {
-        delay: 0,
-        tolerance: 0
+        delay: 250, // Delay before activating drag
+        tolerance: 8, // Movement tolerance
+        distance: 2, // Minimum distance before activating
       }
     }),
     useSensor(PointerSensor, {
-      // Better touch handling
       activationConstraint: {
-        distance: 8, // Minimum distance before drag starts
-        tolerance: 5, // Movement tolerance
+        distance: 8, // Distance in pixels before activating
+        delay: 0 // No delay for pointer events
       }
     }),
     useSensor(KeyboardSensor, {
@@ -657,7 +693,10 @@ export default function MergePDF() {
     }
   }, []);
 
-  const handleMerge = useCallback(async () => {
+  // Add retry logic for merge operation
+  const handleMerge = useCallback(async (retryCount = 0) => {
+    const MAX_RETRIES = 2;
+    
     if (files.length === 0) {
       toast({
         title: "No files selected",
@@ -704,13 +743,14 @@ export default function MergePDF() {
         setMergedPdfUrl(null);
       }
 
-      // Prepare form data
+      // Prepare form data with optimized chunk size
       const formData = new FormData();
+      const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
       
       // Show initial progress
       setMergeProgress(10);
 
-      // Add files to form data with progress tracking
+      // Add files to form data with progress tracking and chunked upload
       const totalFiles = files.length;
       for (let i = 0; i < files.length; i++) {
         const fileItem = files[i];
@@ -720,19 +760,21 @@ export default function MergePDF() {
             throw new Error(`Content missing for file: ${fileItem.name}`);
           }
 
-          // Create a blob from the content
-          const blob = new Blob([fileItem.content], { type: 'application/pdf' });
+          // Create a blob from the content with chunking
+          const chunks = [];
+          let offset = 0;
+          while (offset < fileItem.content.byteLength) {
+            chunks.push(fileItem.content.slice(offset, offset + CHUNK_SIZE));
+            offset += CHUNK_SIZE;
+          }
+
+          // Combine chunks and verify PDF
+          const blob = new Blob(chunks, { type: 'application/pdf' });
           
           // Verify PDF structure
-          const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-          const isPDFHeader = header[0] === 0x25 && // %
-                            header[1] === 0x50 && // P
-                            header[2] === 0x44 && // D
-                            header[3] === 0x46 && // F
-                            header[4] === 0x2D;   // -
-          
-          if (!isPDFHeader) {
-            throw new Error(`Invalid PDF format: ${fileItem.name}`);
+          const validation = await validatePDF(new File([blob], fileItem.name, { type: 'application/pdf' }));
+          if (!validation.isValid) {
+            throw new Error(`Invalid PDF: ${validation.error}`);
           }
 
           // Add to form data
@@ -740,92 +782,118 @@ export default function MergePDF() {
           
           // Update progress (10-50%)
           setMergeProgress(10 + Math.floor((i + 1) / totalFiles * 40));
+
+          // Clear chunk memory
+          chunks.length = 0;
         } catch (error) {
           throw new Error(`Error processing ${fileItem.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
       }
 
-      // Set headers for better performance
+      // Set optimized headers for better performance
       const headers = new Headers({
         'Accept': 'application/pdf',
         'Accept-Encoding': 'gzip, deflate',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
       });
 
-      // Start merge request
+      // Start merge request with timeout
       setMergeProgress(50);
-      const response = await fetch("/api/merge", {
-        method: "POST",
-        body: formData,
-        signal: abortControllerRef.current.signal,
-        headers
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to merge PDFs' }));
-        throw new Error(errorData.error || "Failed to merge PDFs");
-      }
+      try {
+        const response = await fetch("/api/merge", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+          headers
+        });
 
-      // Read response as blob with progress tracking
-      setMergeProgress(60);
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("Failed to get response reader");
-      }
+        clearTimeout(timeout);
 
-      const chunks: Uint8Array[] = [];
-      let receivedLength = 0;
-      
-      while (true) {
-        const { done, value } = await reader.read();
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: 'Failed to merge PDFs' }));
+          throw new Error(errorData.error || "Failed to merge PDFs");
+        }
+
+        // Read response as stream with progress tracking
+        setMergeProgress(60);
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error("Failed to get response reader");
+        }
+
+        const chunks: Uint8Array[] = [];
+        let receivedLength = 0;
         
-        if (done) break;
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) break;
+          
+          chunks.push(value);
+          receivedLength += value.length;
+          
+          // Update progress (60-90%)
+          setMergeProgress(60 + Math.floor((receivedLength / totalSize) * 30));
+        }
+
+        // Combine chunks and create blob with optimized memory usage
+        setMergeProgress(90);
+        const blob = new Blob(chunks, { type: 'application/pdf' });
         
-        chunks.push(value);
-        receivedLength += value.length;
+        // Clear chunks to free memory
+        chunks.length = 0;
         
-        // Update progress (60-90%)
-        setMergeProgress(60 + Math.floor((receivedLength / totalSize) * 30));
+        if (blob.size === 0) {
+          throw new Error("Generated PDF is empty");
+        }
+
+        // Verify merged PDF
+        const validation = await validatePDF(new File([blob], 'merged.pdf', { type: 'application/pdf' }));
+        if (!validation.isValid) {
+          throw new Error("Generated PDF is corrupted");
+        }
+
+        // Create URL and finish
+        const url = URL.createObjectURL(blob);
+        setMergedPdfUrl(url);
+        setMergeProgress(100);
+        setIsComplete(true);
+
+        toast({
+          title: "Success!",
+          description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
+          variant: "default",
+        });
+
+      } catch (error) {
+        clearTimeout(timeout);
+        throw error;
       }
-
-      // Combine chunks and create blob
-      setMergeProgress(90);
-      const blob = new Blob(chunks, { type: 'application/pdf' });
-      
-      if (blob.size === 0) {
-        throw new Error("Generated PDF is empty");
-      }
-
-      // Verify merged PDF
-      const mergedHeader = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-      const isMergedPDFValid = mergedHeader[0] === 0x25 && // %
-                              mergedHeader[1] === 0x50 && // P
-                              mergedHeader[2] === 0x44 && // D
-                              mergedHeader[3] === 0x46 && // F
-                              mergedHeader[4] === 0x2D;   // -
-
-      if (!isMergedPDFValid) {
-        throw new Error("Generated PDF is corrupted");
-      }
-
-      // Create URL and finish
-      const url = URL.createObjectURL(blob);
-      setMergedPdfUrl(url);
-      setMergeProgress(100);
-      setIsComplete(true);
-
-      toast({
-        title: "Success!",
-        description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
-        variant: "default",
-      });
 
     } catch (error) {
       console.error("Error merging PDFs:", error);
+      
+      // Implement retry logic
+      if (retryCount < MAX_RETRIES) {
+        toast({
+          title: "Retrying...",
+          description: `Attempt ${retryCount + 1} of ${MAX_RETRIES}`,
+          variant: "default",
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
+        return handleMerge(retryCount + 1);
+      }
+      
       let errorMessage = "Failed to merge PDFs. Please try again.";
       
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "Operation cancelled. Please try again.";
+          errorMessage = "Operation timed out. Please try again.";
         } else {
           errorMessage = error.message;
         }
@@ -890,6 +958,34 @@ export default function MergePDF() {
       // when their key objects are no longer referenced
     };
   }, [mergedPdfUrl]);
+
+  // Add custom scrollbar styles for better mobile experience
+  const globalStyles = css`
+    .custom-scrollbar {
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+    }
+    
+    .custom-scrollbar::-webkit-scrollbar {
+      width: 6px;
+    }
+    
+    .custom-scrollbar::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    
+    .custom-scrollbar::-webkit-scrollbar-thumb {
+      background-color: rgba(0, 0, 0, 0.2);
+      border-radius: 3px;
+    }
+    
+    @media (pointer: coarse) {
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 2px;
+      }
+    }
+  `;
 
   if (!isLoaded || !userId) {
     return (
@@ -1011,6 +1107,10 @@ export default function MergePDF() {
                         initial="hidden"
                         animate="visible"
                         className="space-y-1.5 max-h-[calc(100vh-300px)] sm:max-h-[250px] overflow-y-auto overscroll-contain custom-scrollbar"
+                        style={{
+                          touchAction: 'pan-y',
+                          WebkitOverflowScrolling: 'touch',
+                        }}
                       >
                         <AnimatePresence mode="popLayout">
                           {files.map((file) => (
@@ -1028,7 +1128,7 @@ export default function MergePDF() {
                   {files.length >= 2 ? (
                     <div className="space-y-2">
                       <Button
-                        onClick={handleMerge}
+                        onClick={() => handleMerge(0)}
                         disabled={isMerging || isOverLimit().isOverLimit}
                         className={cn(
                           "w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-3 sm:py-4 text-sm sm:text-base",

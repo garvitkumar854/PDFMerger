@@ -5,9 +5,10 @@ export interface FileValidationError {
   code: string;
 }
 
-export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-export const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
-export const MAX_FILES = 10;
+export interface PDFValidationResult {
+  isValid: boolean;
+  error?: FileValidationError;
+}
 
 export interface ValidationResult {
   validFiles: File[];
@@ -19,6 +20,10 @@ export interface ValidationResult {
   error?: FileValidationError;
 }
 
+export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+export const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
+export const MAX_FILES = 10;
+
 // Keep track of processed files globally
 let processedFiles = new Set<string>();
 
@@ -27,8 +32,7 @@ export function clearProcessedFiles(): void {
 }
 
 export function removeFromProcessedFiles(filename: string) {
-  // This function is kept for backward compatibility
-  clearProcessedFiles();
+  processedFiles.delete(filename);
 }
 
 function normalizeFileName(file: File): string {
@@ -41,62 +45,51 @@ function getProcessedFilesDebug(): string[] {
   return Array.from(processedFiles);
 }
 
-export async function validatePDF(file: File): Promise<FileValidationError | undefined> {
-  if (!file) {
-    return {
-      message: 'No file provided',
-      code: 'NO_FILE'
-    };
-  }
-
-  // Check file size
-  if (file.size === 0) {
-    return {
-      message: 'File is empty',
-      code: 'EMPTY_FILE'
-    };
-  }
-
-  if (file.size > MAX_FILE_SIZE) {
-    return {
-      message: `File size (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds limit of ${MAX_FILE_SIZE / (1024 * 1024)}MB`,
-      code: 'FILE_TOO_LARGE'
-    };
-  }
-
-  // Validate file type
-  const isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-  if (!isPDF) {
-    return {
-      message: 'Only PDF files are allowed',
-      code: 'INVALID_FILE_TYPE'
-    };
-  }
-
+const validatePDF = async (file: File): Promise<PDFValidationResult> => {
   try {
-    const smallBuffer = await file.slice(0, Math.min(file.size, 1024 * 1024)).arrayBuffer(); // First 1MB max
-    const pdfDoc = await PDFDocument.load(smallBuffer, {
-      updateMetadata: false,
-      ignoreEncryption: true,
-      throwOnInvalidObject: false
-    });
-
-    // Additional PDF validation if needed
-    if (!pdfDoc || !pdfDoc.getPageCount()) {
-      return {
-        message: 'Invalid PDF format: No pages found',
-        code: 'INVALID_PDF'
+    // Add signature validation
+    const header = await file.slice(0, 5).arrayBuffer();
+    const view = new Uint8Array(header);
+    const hasValidSignature = view[0] === 0x25 && // %
+                             view[1] === 0x50 && // P
+                             view[2] === 0x44 && // D
+                             view[3] === 0x46 && // F
+                             view[4] === 0x2D;   // -
+    
+    if (!hasValidSignature) {
+      return { 
+        isValid: false, 
+        error: {
+          message: 'Invalid PDF format',
+          code: 'INVALID_PDF_FORMAT'
+        }
       };
     }
-
-    return undefined;
+    
+    // Add version check
+    const versionBytes = await file.slice(5, 8).arrayBuffer();
+    const version = new TextDecoder().decode(versionBytes);
+    if (!version.match(/^[0-9]\.[0-9]$/)) {
+      return { 
+        isValid: false, 
+        error: {
+          message: 'Unsupported PDF version',
+          code: 'UNSUPPORTED_PDF_VERSION'
+        }
+      };
+    }
+    
+    return { isValid: true };
   } catch (error) {
     return {
-      message: error instanceof Error ? error.message : 'Invalid PDF format',
-      code: 'INVALID_PDF'
+      isValid: false,
+      error: {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        code: 'PDF_VALIDATION_ERROR'
+      }
     };
   }
-}
+};
 
 export async function validateFiles(
   files: File[],
@@ -134,12 +127,21 @@ export async function validateFiles(
         return result;
       }
 
-      // Validate PDF structure
-      const validation = await validatePDF(file);
-      if (validation) {
+      // Check individual file size
+      if (file.size > MAX_FILE_SIZE) {
         result.invalidFiles.push({
           file,
-          reason: validation.message
+          reason: `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`
+        });
+        continue;
+      }
+
+      // Validate PDF structure
+      const validation = await validatePDF(file);
+      if (!validation.isValid) {
+        result.invalidFiles.push({
+          file,
+          reason: validation.error?.message || 'Invalid PDF file'
         });
         continue;
       }

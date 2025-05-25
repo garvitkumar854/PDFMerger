@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
-import { PDFDocument } from "pdf-lib";
+import { NextRequest, NextResponse } from 'next/server';
+import { PDFDocument } from 'pdf-lib';
 import { WorkerPool } from "../utils/workerPool";
 import { createHash } from "crypto";
 import { headers } from 'next/headers';
@@ -7,7 +7,7 @@ import { performanceMonitor } from "../monitoring";
 
 // Constants
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
-const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB
+const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB
 const MAX_PROCESSING_TIME = 300000; // 5 minutes
 const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 const MEDIUM_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
@@ -127,121 +127,108 @@ const createErrorResponse = (error: string, status: number = 400) => {
   );
 };
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   const startTime = Date.now();
   const requestId = createHash('sha256').update(Date.now().toString()).digest('hex').slice(0, 8);
   let timeoutId: NodeJS.Timeout | undefined;
   let abortController: AbortController | undefined;
 
   try {
-    // Request validation with timeout handling
-    abortController = new AbortController();
-    timeoutId = setTimeout(() => {
-      abortController?.abort();
-      throw new Error("Request timeout exceeded");
-    }, MAX_PROCESSING_TIME);
-
-    const contentType = request.headers.get("content-type");
-    if (!contentType?.includes("multipart/form-data")) {
-      return createErrorResponse("Content type must be multipart/form-data");
+    // Check if the request is multipart/form-data
+    if (!request.headers.get('content-type')?.includes('multipart/form-data')) {
+      return NextResponse.json(
+        { error: 'Invalid request format. Must be multipart/form-data.' },
+        { status: 400 }
+      );
     }
 
-    const userAgent = request.headers.get('user-agent') || 'Unknown';
-    console.log(`[${requestId}] Processing request from ${userAgent}`);
-
+    // Get form data
     const formData = await request.formData();
-    const files = formData.getAll("files") as File[];
+    const files = formData.getAll('files') as File[];
 
-    if (!files || files.length < 2) {
-      return createErrorResponse("At least two PDF files are required");
+    // Validate files
+    if (!files || files.length === 0) {
+      return NextResponse.json(
+        { error: 'No PDF files provided.' },
+        { status: 400 }
+      );
     }
 
-    if (files.length > 10) {
-      return createErrorResponse("Maximum 10 files allowed");
+    if (files.length === 1) {
+      return NextResponse.json(
+        { error: 'Please provide at least 2 PDF files to merge.' },
+        { status: 400 }
+      );
     }
 
-    console.log(`[${requestId}] Processing ${files.length} files`);
-
-    // Validate and process files
-    const processedFiles: { buffer: ArrayBuffer; name: string }[] = [];
-    let totalSize = 0;
-
-    for (const file of files) {
-      if (file.size > MAX_FILE_SIZE) {
-        return createErrorResponse(`File ${file.name} exceeds maximum size of 100MB`);
-      }
-
-      totalSize += file.size;
-      if (totalSize > MAX_TOTAL_SIZE) {
-        return createErrorResponse("Total file size exceeds 200MB limit");
-      }
-
-      const buffer = await file.arrayBuffer();
-      const validation = await validatePDF(buffer);
-      
-      if (!validation.isValid) {
-        return createErrorResponse(`Invalid PDF file (${file.name}): ${validation.error}`);
-      }
-
-      processedFiles.push({ buffer, name: file.name });
+    // Check total size
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    if (totalSize > MAX_TOTAL_SIZE) {
+      return NextResponse.json(
+        { error: `Total file size exceeds ${MAX_TOTAL_SIZE / (1024 * 1024)}MB limit.` },
+        { status: 400 }
+      );
     }
 
-    // Create and optimize the merged PDF
+    // Create a new PDF document
     const mergedPdf = await PDFDocument.create();
-    
-    // Process PDFs in sequence to maintain order
-    for (const { buffer, name } of processedFiles) {
+
+    // Process each file
+    for (const file of files) {
       try {
-        const pdfDoc = await PDFDocument.load(buffer, { 
+        // Read file as ArrayBuffer
+        const buffer = await file.arrayBuffer();
+        
+        // Load the PDF document
+        const pdf = await PDFDocument.load(buffer, {
           ignoreEncryption: true,
           updateMetadata: false,
           throwOnInvalidObject: false
         });
 
-        const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+        // Copy all pages
+        const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
         pages.forEach(page => mergedPdf.addPage(page));
 
-        console.log(`[${requestId}] Processed ${name}: ${pages.length} pages`);
       } catch (error) {
-        console.error(`[${requestId}] Error processing ${name}:`, error);
-        return createErrorResponse(`Failed to process ${name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-
-      if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-        throw new Error("Processing timeout exceeded");
+        console.error(`Error processing file ${file.name}:`, error);
+        return NextResponse.json(
+          { error: `Failed to process file ${file.name}. Please ensure it's a valid PDF.` },
+          { status: 400 }
+        );
       }
     }
 
-    // Save with optimized settings
+    // Save the merged PDF with optimized settings
     const mergedPdfBytes = await mergedPdf.save({
       useObjectStreams: true,
       addDefaultPage: false,
-      objectsPerTick: Math.min(50, Math.ceil(mergedPdf.getPageCount() / 2))
+      objectsPerTick: 50,
+      updateFieldAppearances: false
     });
 
-    const duration = Date.now() - startTime;
-    performanceMonitor.trackRequest(duration);
-
-    console.log(`[${requestId}] Successfully merged ${files.length} files in ${duration}ms`);
-    
-    // Return optimized streaming response
+    // Return the merged PDF
     return new NextResponse(mergedPdfBytes, {
+      status: 200,
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="merged-${new Date().toISOString().slice(0, 10)}.pdf"`,
-        'Content-Length': mergedPdfBytes.length.toString(),
-        'Cache-Control': 'no-store'
-      }
+        'Content-Disposition': 'attachment; filename=merged.pdf',
+        'Cache-Control': 'no-cache',
+        'Content-Length': mergedPdfBytes.length.toString()
+      },
     });
 
   } catch (error) {
-    console.error(`[${requestId}] Error:`, error);
-    return createErrorResponse(
-      error instanceof Error ? error.message : 'Failed to merge PDFs',
-      error instanceof Error && error.message.includes('timeout') ? 408 : 500
+    console.error('PDF merge error:', error);
+    return NextResponse.json(
+      { error: 'Failed to merge PDFs. Please try again.' },
+      { status: 500 }
     );
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-    if (abortController) abortController.abort();
   }
-} 
+}
+
+// Replace the old config export with the new route segment config
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const maxDuration = 60; 
