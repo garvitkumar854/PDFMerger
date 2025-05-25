@@ -5,12 +5,12 @@ import { createHash } from "crypto";
 import { headers } from 'next/headers';
 
 // Constants
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB
 const MAX_PROCESSING_TIME = 300000; // 5 minutes
-const SMALL_FILE_THRESHOLD = 5 * 1024 * 1024; // 5MB
-const MEDIUM_FILE_THRESHOLD = 20 * 1024 * 1024; // 20MB
-const CHUNK_SIZE = 512 * 1024; // 512KB chunks for better streaming
+const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
+const MEDIUM_FILE_THRESHOLD = 50 * 1024 * 1024; // 50MB
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for streaming
 
 // Initialize worker pool with monitoring
 const workerPool = new WorkerPool();
@@ -232,6 +232,84 @@ function createErrorResponse(message: string, status = 400) {
   );
 }
 
+// Add optimized chunk processing
+const PROCESSING_CHUNK_SIZE = 5;
+
+// Optimize parallel processing
+async function processFilesInParallel(files: File[], startTime: number) {
+  const chunks: File[][] = [];
+  for (let i = 0; i < files.length; i += PROCESSING_CHUNK_SIZE) {
+    chunks.push(files.slice(i, i + PROCESSING_CHUNK_SIZE));
+  }
+
+  const pdfBuffers: ArrayBuffer[] = [];
+  const fileMetadata: { name: string; size: number; hash: string }[] = [];
+  let totalSize = 0;
+
+  // Process chunks in sequence, but files within chunks in parallel
+  for (const chunk of chunks) {
+    const chunkResults = await Promise.all(chunk.map(async (file) => {
+      if (!file.type && !file.name.toLowerCase().endsWith('.pdf')) {
+        throw new Error(`File ${file.name} is not a valid PDF`);
+      }
+
+      if (file.size > MAX_FILE_SIZE) {
+        throw new Error(`File ${file.name} exceeds maximum size of 100MB`);
+      }
+
+      try {
+        const buffer = await retryOperation(async () => {
+          if (file.size < SMALL_FILE_THRESHOLD) {
+            return await file.arrayBuffer();
+          }
+
+          const chunks: Uint8Array[] = [];
+          const reader = file.stream().getReader();
+          const chunkSize = file.size < MEDIUM_FILE_THRESHOLD ? 2 * 1024 * 1024 : CHUNK_SIZE;
+          
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            
+            if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+              throw new Error("Processing timeout exceeded");
+            }
+
+            if (file.size >= MEDIUM_FILE_THRESHOLD) {
+              await new Promise(resolve => setTimeout(resolve, 5));
+            }
+          }
+
+          return await new Blob(chunks).arrayBuffer();
+        }, 3);
+
+        const hash = createHash('sha256').update(new Uint8Array(buffer)).digest('hex');
+        
+        return {
+          buffer,
+          metadata: { name: file.name, size: file.size, hash }
+        };
+      } catch (error) {
+        throw new Error(`Failed to load ${file.name}: ${getErrorMessage(error)}`);
+      }
+    }));
+
+    // Add results to main arrays
+    for (const result of chunkResults) {
+      pdfBuffers.push(result.buffer);
+      fileMetadata.push(result.metadata);
+      totalSize += result.metadata.size;
+
+      if (totalSize > MAX_TOTAL_SIZE) {
+        throw new Error("Total file size exceeds 200MB limit");
+      }
+    }
+  }
+
+  return { pdfBuffers, fileMetadata, totalSize };
+}
+
 export async function POST(request: Request) {
   const startTime = Date.now();
   const requestId = createHash('sha256').update(Date.now().toString()).digest('hex').slice(0, 8);
@@ -246,7 +324,6 @@ export async function POST(request: Request) {
       throw new Error("Request timeout exceeded");
     }, MAX_PROCESSING_TIME);
 
-    // Content type validation
     const contentType = request.headers.get("content-type");
     if (!contentType?.includes("multipart/form-data")) {
       return createErrorResponse("Content type must be multipart/form-data");
@@ -262,66 +339,15 @@ export async function POST(request: Request) {
       return createErrorResponse("At least two PDF files are required");
     }
 
-    // Validate and prepare files with optimized loading
-    let totalSize = 0;
-    const pdfBuffers: ArrayBuffer[] = [];
-    const fileMetadata: { name: string; size: number; hash: string }[] = [];
-
     console.log(`[${requestId}] Processing ${files.length} files`);
 
-    // Process files in parallel with retries
-    await Promise.all(files.map(async (file) => {
-      if (!file.type || file.type !== "application/pdf") {
-        throw new Error(`File ${file.name} is not a valid PDF`);
-      }
+    // Process files in optimized parallel chunks
+    const { pdfBuffers, fileMetadata, totalSize } = await processFilesInParallel(files, startTime);
 
-      if (file.size > MAX_FILE_SIZE) {
-        throw new Error(`File ${file.name} exceeds maximum size of 50MB`);
-      }
-
-      totalSize += file.size;
-      if (totalSize > MAX_TOTAL_SIZE) {
-        throw new Error("Total file size exceeds 100MB limit");
-      }
-
-      try {
-        // Optimized file loading based on size with retry
-        const buffer = await retryOperation(async () => {
-          if (file.size < SMALL_FILE_THRESHOLD) {
-            return await file.arrayBuffer();
-          } else {
-            const chunks: Uint8Array[] = [];
-            const reader = file.stream().getReader();
-            const chunkSize = file.size < MEDIUM_FILE_THRESHOLD ? 1024 * 1024 : CHUNK_SIZE;
-            
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              chunks.push(value);
-              
-              if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-                throw new Error("Processing timeout exceeded");
-              }
-            }
-
-            return await new Blob(chunks).arrayBuffer();
-          }
-        });
-
-        const hash = createHash('sha256').update(new Uint8Array(buffer)).digest('hex');
-        
-        pdfBuffers.push(buffer);
-        fileMetadata.push({ name: file.name, size: file.size, hash });
-      } catch (error) {
-        throw new Error(`Failed to load ${file.name}: ${getErrorMessage(error)}`);
-      }
-    }));
-
-    // Generate cache key
+    // Generate cache key and check cache
     const cacheKey = fileMetadata.map(f => f.hash).sort().join('|');
-
-    // Check cache
     const cachedResult = pdfCache.get(cacheKey);
+    
     if (cachedResult) {
       console.log(`[${requestId}] Cache hit! Serving cached result`);
       return createStreamingResponse(cachedResult, `merged-${new Date().toISOString().slice(0, 10)}.pdf`);
@@ -329,24 +355,23 @@ export async function POST(request: Request) {
 
     console.log(`[${requestId}] Cache miss. Processing files...`);
 
-    // Create a new PDF document
+    // Create and optimize the merged PDF
     const mergedPdf = await PDFDocument.create();
+    
+    // Process PDFs in parallel chunks
+    const chunkSize = Math.min(5, Math.ceil(pdfBuffers.length / 4));
+    for (let i = 0; i < pdfBuffers.length; i += chunkSize) {
+      const chunk = pdfBuffers.slice(i, i + chunkSize);
+      const chunkDocs = await Promise.all(chunk.map(buffer => 
+        PDFDocument.load(buffer, { ignoreEncryption: true })
+      ));
 
-    // Process each PDF file
-    for (let index = 0; index < pdfBuffers.length; index++) {
-      try {
-        const pdfDoc = await PDFDocument.load(pdfBuffers[index], {
-          ignoreEncryption: true,
-        });
-
+      for (let j = 0; j < chunkDocs.length; j++) {
+        const pdfDoc = chunkDocs[j];
         const pages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
-        pages.forEach((page) => {
-          mergedPdf.addPage(page);
-        });
+        pages.forEach(page => mergedPdf.addPage(page));
 
-        console.log(`[${requestId}] Processed ${fileMetadata[index].name}: ${pages.length} pages`);
-      } catch (error) {
-        throw new Error(`Failed to process ${fileMetadata[index].name}: ${getErrorMessage(error)}`);
+        console.log(`[${requestId}] Processed ${fileMetadata[i + j].name}: ${pages.length} pages`);
       }
 
       if (Date.now() - startTime > MAX_PROCESSING_TIME) {
@@ -354,8 +379,13 @@ export async function POST(request: Request) {
       }
     }
 
-    // Save the merged PDF
-    const mergedPdfBytes = await mergedPdf.save();
+    // Save the merged PDF with optimized settings
+    const mergedPdfBytes = await mergedPdf.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+      objectsPerTick: Math.min(50, Math.ceil(mergedPdf.getPageCount() / 2))
+    });
+    
     const mergedBuffer = new Uint8Array(mergedPdfBytes);
 
     // Cache the result

@@ -18,33 +18,53 @@ function validatePDFHeader(buffer) {
   return false;
 }
 
-// Optimize PDF document
+// Add memory optimization utilities
+const MEMORY_CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+
+// Optimize buffer handling
+function optimizeBuffer(buffer) {
+  if (buffer.length <= MEMORY_CHUNK_SIZE) return buffer;
+  
+  // Process large buffers in chunks
+  const chunks = [];
+  for (let i = 0; i < buffer.length; i += MEMORY_CHUNK_SIZE) {
+    chunks.push(buffer.slice(i, Math.min(i + MEMORY_CHUNK_SIZE, buffer.length)));
+  }
+  return Buffer.concat(chunks);
+}
+
+// Enhanced PDF optimization
 async function optimizePDF(pdfDoc) {
   try {
-    // Remove empty pages if any
-    const pageCount = pdfDoc.getPageCount();
-    for (let i = pageCount - 1; i >= 0; i--) {
-      const page = pdfDoc.getPage(i);
-      if (!page.node.Contents) {
-        pdfDoc.removePage(i);
-      }
+    // Remove unused resources
+    const pages = pdfDoc.getPages();
+    const usedObjects = new Set();
+
+    // Track used objects
+    for (const page of pages) {
+      const refs = page.node.getContainedObjects();
+      refs.forEach(ref => usedObjects.add(ref));
     }
 
-    // Compress streams if possible
-    const pages = pdfDoc.getPages();
+    // Clean up unused objects
+    pdfDoc.context.objects.forEach((obj, ref) => {
+      if (!usedObjects.has(ref)) {
+        pdfDoc.context.delete(ref);
+      }
+    });
+
+    // Optimize content streams
     for (const page of pages) {
       if (page.node.Contents instanceof Array) {
-        // Merge multiple content streams into one
         const contents = page.node.Contents.filter(Boolean);
-        if (contents.length > 0) {
+        if (contents.length > 1) {
           const mergedStream = contents[0];
           for (let i = 1; i < contents.length; i++) {
-            const stream = contents[i];
-            if (stream && stream.content) {
+            if (contents[i] && contents[i].content) {
               mergedStream.content = Buffer.concat([
                 mergedStream.content,
-                Buffer.from([0x0A]), // newline
-                stream.content
+                Buffer.from([0x0A]),
+                contents[i].content
               ]);
             }
           }
@@ -53,14 +73,10 @@ async function optimizePDF(pdfDoc) {
       }
     }
 
-    // Clean up unused objects
-    const serialized = pdfDoc.context.serialize();
-    const cleaned = await PDFDocument.load(serialized);
-    
-    return cleaned;
+    return pdfDoc;
   } catch (error) {
     console.error('PDF optimization failed:', error);
-    return pdfDoc; // Return original if optimization fails
+    return pdfDoc;
   }
 }
 
@@ -70,130 +86,80 @@ async function processPDFInWorker(pdfBuffer) {
     endTime: 0,
     pageCount: 0,
     fileSize: pdfBuffer ? pdfBuffer.byteLength : 0,
-    compressionRatio: 0
+    compressionRatio: 0,
+    optimizationTime: 0
   };
 
   try {
-    // Validate input
-    if (!pdfBuffer || !(pdfBuffer instanceof ArrayBuffer || pdfBuffer instanceof Uint8Array)) {
-      throw new Error('Invalid PDF buffer provided');
-    }
+    // Optimize buffer handling
+    const buffer = optimizeBuffer(pdfBuffer instanceof Uint8Array ? pdfBuffer : new Uint8Array(pdfBuffer));
 
-    // Convert to Uint8Array if needed
-    const buffer = pdfBuffer instanceof Uint8Array ? pdfBuffer : new Uint8Array(pdfBuffer);
+    // Validate and process in parallel
+    const [isValid, initialDoc] = await Promise.all([
+      validatePDFHeader(buffer),
+      PDFDocument.load(buffer, {
+        updateMetadata: false,
+        ignoreEncryption: true,
+        parseSpeed: buffer.length < 10 * 1024 * 1024 ? 1500 : 500,
+        throwOnInvalidObject: false
+      }).catch(() => null)
+    ]);
 
-    // Validate minimum size
-    if (buffer.length < 5) {
-      throw new Error('PDF file is too small to be valid');
-    }
-
-    // Validate PDF header
-    if (!validatePDFHeader(buffer)) {
+    if (!isValid) {
       throw new Error('Invalid PDF format: Missing PDF header');
     }
 
-    // Determine file size categories
-    const isSmallFile = buffer.byteLength < 5 * 1024 * 1024; // Less than 5MB
-    const isMediumFile = buffer.byteLength < 20 * 1024 * 1024; // Less than 20MB
-
-    let pdfDoc;
-    try {
-      // First try with standard settings
+    let pdfDoc = initialDoc;
+    if (!pdfDoc) {
+      // Fallback to conservative loading
       pdfDoc = await PDFDocument.load(buffer, {
         updateMetadata: false,
         ignoreEncryption: true,
-        parseSpeed: isSmallFile ? 1000 : isMediumFile ? 500 : 100
+        parseSpeed: 100,
+        throwOnInvalidObject: false,
+        capNumbers: true
       });
-    } catch (loadError) {
-      console.error('Initial PDF load failed:', loadError);
-      
-      // Try again with more lenient settings
-      try {
-        pdfDoc = await PDFDocument.load(buffer, {
-          updateMetadata: false,
-          ignoreEncryption: true,
-          parseSpeed: 50,
-          throwOnInvalidObject: false
-        });
-      } catch (retryError) {
-        throw new Error('Failed to load PDF: The file may be corrupted or password protected');
-      }
     }
 
     if (!pdfDoc) {
       throw new Error('Failed to load PDF document');
     }
 
-    metrics.pageCount = pdfDoc.getPageCount();
+    // Process pages in optimized chunks
+    const pageCount = pdfDoc.getPageCount();
+    metrics.pageCount = pageCount;
 
-    if (metrics.pageCount === 0) {
-      throw new Error('PDF appears to be empty');
+    if (pageCount > 10 || buffer.length > 10 * 1024 * 1024) {
+      const optimizationStart = Date.now();
+      pdfDoc = await optimizePDF(pdfDoc);
+      metrics.optimizationTime = Date.now() - optimizationStart;
     }
 
-    // Optimize based on file characteristics
-    const needsOptimization = !isSmallFile || metrics.pageCount > 10;
-    const optimizedDoc = needsOptimization ? await optimizePDF(pdfDoc) : pdfDoc;
-
-    // Save with optimized settings
-    const objectsPerTick = isSmallFile ? 
-      1000 : // Process all at once for small files
-      isMediumFile ?
-        Math.min(100, Math.max(50, Math.floor(metrics.pageCount / 5))) : // Medium files
-        Math.min(50, Math.max(25, Math.floor(metrics.pageCount / 10))); // Large files
-
-    let savedBuffer;
-    try {
-      savedBuffer = await optimizedDoc.save({
-        useObjectStreams: !isSmallFile,
-        addDefaultPage: false,
-        objectsPerTick,
-        updateFieldAppearances: false
-      });
-    } catch (saveError) {
-      console.error('Failed to save with optimal settings:', saveError);
-      
-      // Try again with minimal settings
-      savedBuffer = await optimizedDoc.save({
-        useObjectStreams: false,
-        addDefaultPage: false,
-        objectsPerTick: 25,
-        updateFieldAppearances: false
-      });
-    }
-
-    if (!savedBuffer || savedBuffer.length === 0) {
-      throw new Error('Failed to generate PDF output');
+    // Progressive loading for large files
+    if (buffer.length > 10 * 1024 * 1024) {
+      const chunkSize = Math.min(10, Math.ceil(pageCount / 4));
+      for (let i = 0; i < pageCount; i += chunkSize) {
+        const end = Math.min(i + chunkSize, pageCount);
+        await pdfDoc.getPages().slice(i, end);
+        
+        if (buffer.length > 50 * 1024 * 1024) {
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+      }
     }
 
     metrics.endTime = Date.now();
-    metrics.compressionRatio = savedBuffer.length / metrics.fileSize;
-
-    // Return processed data with metrics
     return {
       success: true,
-      pageCount: metrics.pageCount,
-      buffer: savedBuffer,
-      metrics: {
-        processingTime: metrics.endTime - metrics.startTime,
-        originalSize: metrics.fileSize,
-        optimizedSize: savedBuffer.length,
-        compressionRatio: metrics.compressionRatio,
-        pagesProcessed: metrics.pageCount,
-        isOptimized: needsOptimization
-      }
+      metrics,
+      document: pdfDoc
     };
-
   } catch (error) {
     metrics.endTime = Date.now();
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-      metrics: {
-        processingTime: metrics.endTime - metrics.startTime,
-        originalSize: metrics.fileSize,
-        error: true,
-        errorDetails: error instanceof Error ? error.stack : undefined
-      }
+      error: error instanceof Error ? error.message : 'Unknown error processing PDF',
+      metrics
     };
   }
 }

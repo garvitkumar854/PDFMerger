@@ -27,9 +27,11 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { motion, AnimatePresence } from "framer-motion";
+import { cn } from "@/lib/utils";
 
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB
 const MAX_FILES = 10;
 
 interface FileItem {
@@ -45,6 +47,50 @@ interface SortableFileItemProps {
   onRemove: (file: FileItem) => void;
 }
 
+// Add animation variants
+const containerVariants = {
+  hidden: { opacity: 0 },
+  visible: { 
+    opacity: 1,
+    transition: {
+      duration: 0.2,
+      ease: "easeOut",
+      when: "beforeChildren",
+      staggerChildren: 0.1
+    }
+  }
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { 
+    opacity: 1, 
+    y: 0,
+    transition: {
+      duration: 0.2,
+      ease: "easeOut"
+    }
+  }
+};
+
+// Add these animation constants
+const SPRING_ANIMATION = {
+  type: "spring",
+  stiffness: 500,
+  damping: 30,
+  mass: 0.5
+};
+
+const sortableItemVariants = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { opacity: 1, y: 0 },
+  dragging: { 
+    scale: 1.02,
+    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.12)",
+    cursor: "grabbing"
+  }
+};
+
 const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   const {
     attributes,
@@ -52,26 +98,56 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
     setNodeRef,
     transform,
     transition,
+    isDragging
   } = useSortable({ id: file.id });
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
+    zIndex: isDragging ? 2 : 1,
+    position: 'relative' as const
   };
 
   return (
-    <div
+    <motion.div
       ref={setNodeRef}
       style={style}
-      className="flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm hover:bg-primary/5 transition-colors group"
+      variants={sortableItemVariants}
+      initial="hidden"
+      animate={isDragging ? "dragging" : "visible"}
+      exit={{ opacity: 0, scale: 0.95 }}
+      transition={SPRING_ANIMATION}
+      className={cn(
+        "flex items-center justify-between p-3 rounded-lg border bg-background/50 backdrop-blur-sm group",
+        "hover:bg-primary/5 hover:border-primary/20",
+        "transition-all duration-200 ease-out transform-gpu",
+        isDragging && "border-primary/30"
+      )}
     >
       <div className="flex items-center gap-3 flex-1 min-w-0" {...attributes} {...listeners}>
-        <GripVertical className="h-5 w-5 text-muted-foreground flex-shrink-0 cursor-grab opacity-0 group-hover:opacity-100 transition-opacity" />
+        <motion.div 
+          whileHover={{ scale: 1.1 }}
+          transition={SPRING_ANIMATION}
+          className="cursor-grab active:cursor-grabbing"
+        >
+          <GripVertical className={cn(
+            "h-5 w-5 text-muted-foreground flex-shrink-0",
+            "opacity-0 group-hover:opacity-100 transition-opacity duration-200",
+            isDragging && "opacity-100"
+          )} />
+        </motion.div>
         <div className="flex items-center gap-3 truncate flex-1 min-w-0">
           <div className="relative">
-            <FileText className="h-5 w-5 text-primary flex-shrink-0" />
+            <FileText className={cn(
+              "h-5 w-5 flex-shrink-0",
+              isDragging ? "text-primary" : "text-primary/80"
+            )} />
             {file.content && (
-              <div className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full" />
+              <motion.div 
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                className="absolute -top-1 -right-1 w-2 h-2 bg-green-500 rounded-full"
+              />
             )}
           </div>
           <span className="font-medium truncate">{file.name}</span>
@@ -84,11 +160,14 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
         variant="ghost"
         size="icon"
         onClick={() => onRemove(file)}
-        className="h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2 opacity-0 group-hover:opacity-100 transition-opacity"
+        className={cn(
+          "h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2",
+          "opacity-0 group-hover:opacity-100 transition-all duration-200 ease-out"
+        )}
       >
         <X className="h-4 w-4" />
       </Button>
-    </div>
+    </motion.div>
   );
 };
 
@@ -104,7 +183,11 @@ export default function MergePDF() {
   const router = useRouter();
 
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 5, // 5px movement required before drag starts
+      }
+    }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     })
@@ -282,10 +365,51 @@ export default function MergePDF() {
   }, []);
 
   const handleMerge = useCallback(async () => {
-    if (files.length < 2) {
+    // Validate file count
+    if (files.length === 0) {
       toast({
-        title: files.length === 0 ? "No files selected" : "Single file selected",
+        title: "No files selected",
+        description: "Please select PDF files to merge",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (files.length === 1) {
+      toast({
+        title: "Single file selected",
         description: "Please select at least two PDF files to merge",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (files.length > MAX_FILES) {
+      toast({
+        title: "Too many files",
+        description: `Cannot merge more than ${MAX_FILES} files. Please remove some files.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Validate total size
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    if (totalSize > MAX_TOTAL_SIZE) {
+      toast({
+        title: "Total size exceeded",
+        description: `Total size (${(totalSize / (1024 * 1024)).toFixed(1)}MB) exceeds the limit of ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB. Please remove some files.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Check individual file sizes
+    const oversizedFiles = files.filter(file => file.size > MAX_FILE_SIZE);
+    if (oversizedFiles.length > 0) {
+      toast({
+        title: "Files too large",
+        description: `${oversizedFiles.length} file(s) exceed the 100MB limit. Please remove: ${oversizedFiles.map(f => f.name).join(', ')}`,
         variant: "destructive",
       });
       return;
@@ -466,6 +590,23 @@ export default function MergePDF() {
     document.body.removeChild(a);
   }, [mergedPdfUrl]);
 
+  // Update the merge button to be disabled when limits are exceeded
+  const isOverLimit = useCallback(() => {
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    const hasOversizedFiles = files.some(file => file.size > MAX_FILE_SIZE);
+    
+    return {
+      isOverLimit: files.length > MAX_FILES || totalSize > MAX_TOTAL_SIZE || hasOversizedFiles,
+      reason: files.length > MAX_FILES 
+        ? `Too many files (max ${MAX_FILES})` 
+        : totalSize > MAX_TOTAL_SIZE 
+          ? `Total size exceeds ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB` 
+          : hasOversizedFiles 
+            ? 'Some files exceed 100MB'
+            : ''
+    };
+  }, [files]);
+
   if (!isLoaded || !userId) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -479,173 +620,232 @@ export default function MergePDF() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-background/80">
-      <div className="container mx-auto py-4 sm:py-6 md:py-8 px-4 sm:px-6 md:max-w-3xl">
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-8 sm:mb-12">
+    <motion.div 
+      initial="hidden"
+      animate="visible"
+      variants={containerVariants}
+      className="min-h-screen bg-gradient-to-b from-background to-background/80"
+    >
+      <div className="container mx-auto py-4 sm:py-6 lg:py-6 px-4 sm:px-6 lg:max-w-4xl xl:max-w-5xl">
+        <motion.div variants={itemVariants} className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-6 sm:mb-8">
           <Link 
             href="/" 
-            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors rounded-lg px-4 py-2 hover:bg-primary/5 w-full sm:w-auto justify-center sm:justify-start"
+            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-all duration-200 ease-out rounded-lg px-3 py-1.5 hover:bg-primary/5 w-full sm:w-auto justify-center sm:justify-start"
           >
             <ArrowLeft className="h-4 w-4" />
             Back to Home
           </Link>
-          <h1 className="text-2xl sm:text-3xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent text-center sm:text-left">
+          <motion.h1 
+            className="text-2xl sm:text-3xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent text-center sm:text-left"
+          >
             Merge PDFs
-          </h1>
-        </div>
+          </motion.h1>
+        </motion.div>
 
-        {!isComplete ? (
-          <div className="space-y-6">
-            <div className="relative">
-              <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-xl blur-xl" />
+        <AnimatePresence mode="wait">
+          {!isComplete ? (
+            <motion.div
+              key="upload"
+              variants={itemVariants}
+              className="space-y-4 lg:space-y-6"
+            >
               <div className="relative">
-                <FileUpload
-                  onFilesSelected={handleFilesSelected}
-                  maxFiles={MAX_FILES}
-                  acceptedFileTypes={["application/pdf"]}
-                  className="bg-card/95 shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[300px] backdrop-blur-sm"
-                  hideFileList={true}
-                  onError={(error) => {
-                    toast({
-                      title: "Error",
-                      description: error,
-                      variant: "destructive",
-                    });
-                  }}
-                  customText={{
-                    main: files.length === 0 
-                      ? "Drop your PDF files here or click to browse" 
-                      : "Drop more PDF files here or click to browse",
-                    details: (() => {
-                      const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-                      const remainingSize = MAX_TOTAL_SIZE - totalSize;
-                      if (files.length === 0) {
-                        return `Upload up to ${MAX_FILES} PDF files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB total)`;
-                      }
-                      return `${files.length}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used, ${(remainingSize / (1024 * 1024)).toFixed(1)}MB remaining)`;
-                    })()
-                  }}
-                />
-              </div>
-            </div>
-
-            {files.length > 0 && (
-              <div className="space-y-4 bg-card/95 p-6 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm">
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                  <div className="space-y-1.5 w-full sm:w-auto">
-                    <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
-                      Selected Files
-                      <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-2.5 py-0.5 text-sm font-medium text-primary">
-                        {files.length}
-                      </span>
-                    </h2>
-                    <p className="text-sm text-muted-foreground">
-                      {files.length} file{files.length !== 1 ? 's' : ''} selected ({(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)
-                    </p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleClearAll}
-                    className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto"
-                  >
-                    Clear All
-                  </Button>
+                <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-xl blur-xl" />
+                <div className="relative">
+                  <FileUpload
+                    onFilesSelected={handleFilesSelected}
+                    maxFiles={MAX_FILES}
+                    acceptedFileTypes={["application/pdf"]}
+                    className="bg-card/95 shadow-lg rounded-xl border-primary/20 min-h-[200px] sm:min-h-[250px] lg:min-h-[300px] backdrop-blur-sm transition-all duration-300"
+                    hideFileList={true}
+                    currentTotalSize={files.reduce((sum, file) => sum + file.size, 0)}
+                    currentFileCount={files.length}
+                    onError={(error) => {
+                      toast({
+                        title: "Cannot Add Files",
+                        description: error,
+                        variant: "destructive",
+                      });
+                    }}
+                    customText={{
+                      main: files.length === 0 
+                        ? "Drop your PDF files here or click to browse" 
+                        : "Drop more PDF files here or click to browse",
+                      details: (() => {
+                        const { totalSize, remainingSize, totalFiles, remainingFiles } = getRemainingCapacity();
+                        if (files.length === 0) {
+                          return `Upload up to ${MAX_FILES} PDF files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB total)`;
+                        }
+                        return `${totalFiles}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used, ${(remainingSize / (1024 * 1024)).toFixed(1)}MB remaining)`;
+                      })()
+                    }}
+                  />
                 </div>
-
-                <DndContext
-                  sensors={sensors}
-                  collisionDetection={closestCenter}
-                  onDragEnd={handleDragEnd}
-                >
-                  <SortableContext
-                    items={files}
-                    strategy={verticalListSortingStrategy}
-                  >
-                    <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
-                      {files.map((file) => (
-                        <SortableFileItem
-                          key={file.id}
-                          file={file}
-                          onRemove={handleRemoveFile}
-                        />
-                      ))}
-                    </div>
-                  </SortableContext>
-                </DndContext>
-
-                {files.length >= 2 ? (
-                  <div className="space-y-4">
-                    <Button
-                      onClick={handleMerge}
-                      disabled={isMerging}
-                      className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-6 text-base sm:text-lg"
-                    >
-                      {isMerging ? (
-                        <>
-                          <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
-                          Merging...
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
-                          Merge PDFs ({files.length} files)
-                        </>
-                      )}
-                    </Button>
-
-                    {isMerging && (
-                      <div className="space-y-2">
-                        <Progress value={mergeProgress} className="h-2 sm:h-3" />
-                        <p className="text-sm sm:text-base text-muted-foreground text-center">
-                          Processing... {Math.round(mergeProgress)}%
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-lg p-3">
-                    <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                    Add at least one more PDF file to merge
-                  </div>
-                )}
               </div>
-            )}
-          </div>
-        ) : (
-          <div className="bg-card/95 p-8 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm text-center">
-            <div className="rounded-full bg-primary/10 p-4 w-fit mx-auto mb-6">
-              <CheckCircle2 className="h-10 w-10 text-primary" />
-            </div>
-            
-            <h2 className="text-2xl font-semibold text-foreground mb-3">PDF Merged Successfully!</h2>
-            <p className="text-muted-foreground mb-8">
-              Your files have been combined into a single PDF
-            </p>
+
+              {files.length > 0 && (
+                <div className="space-y-4 bg-card/95 p-4 sm:p-5 lg:p-6 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm transition-all duration-300">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="space-y-1 w-full sm:w-auto">
+                      <h2 className="text-base sm:text-lg font-semibold text-foreground flex items-center gap-2">
+                        Selected Files
+                        <span className="inline-flex items-center justify-center rounded-full bg-primary/10 px-2 py-0.5 text-xs sm:text-sm font-medium text-primary">
+                          {files.length}
+                        </span>
+                      </h2>
+                      <p className="text-xs sm:text-sm text-muted-foreground">
+                        {files.length} file{files.length !== 1 ? 's' : ''} selected ({(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(1)}MB total)
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearAll}
+                      className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 w-full sm:w-auto text-xs sm:text-sm"
+                    >
+                      Clear All
+                    </Button>
+                  </div>
+
+                  <DndContext
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <SortableContext
+                      items={files}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      <AnimatePresence mode="popLayout">
+                        <div className="space-y-1.5 max-h-[200px] lg:max-h-[250px] overflow-y-auto custom-scrollbar">
+                          {files.map((file) => (
+                            <SortableFileItem
+                              key={file.id}
+                              file={file}
+                              onRemove={handleRemoveFile}
+                            />
+                          ))}
+                        </div>
+                      </AnimatePresence>
+                    </SortableContext>
+                  </DndContext>
+
+                  {files.length >= 2 ? (
+                    <div className="space-y-3">
+                      <Button
+                        onClick={handleMerge}
+                        disabled={isMerging || isOverLimit().isOverLimit}
+                        className={cn(
+                          "w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-4 lg:py-5 text-base sm:text-lg",
+                          isOverLimit().isOverLimit && "opacity-50 cursor-not-allowed"
+                        )}
+                      >
+                        {isMerging ? (
+                          <>
+                            <Upload className="mr-2 h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+                            Merging...
+                          </>
+                        ) : isOverLimit().isOverLimit ? (
+                          <>
+                            <AlertCircle className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
+                            {isOverLimit().reason}
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="mr-2 h-4 w-4 sm:h-5 sm:w-5" />
+                            Merge PDFs ({files.length} files)
+                          </>
+                        )}
+                      </Button>
+
+                      {isMerging && (
+                        <div className="space-y-2">
+                          <Progress value={mergeProgress} className="h-2" />
+                          <p className="text-sm text-muted-foreground text-center">
+                            Processing... {Math.round(mergeProgress)}%
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-lg p-3">
+                      <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                      Add at least one more PDF file to merge
+                    </div>
+                  )}
+                </div>
+              )}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="success"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className="bg-card/95 p-6 lg:p-8 rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm text-center"
+            >
+              <motion.div
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ 
+                  type: "spring",
+                  stiffness: 500,
+                  damping: 30,
+                  delay: 0.1
+                }}
+                className="rounded-full bg-primary/10 p-3 lg:p-4 w-fit mx-auto mb-5"
+              >
+                <CheckCircle2 className="h-8 w-8 lg:h-10 lg:w-10 text-primary" />
+              </motion.div>
               
-            <div className="flex flex-col gap-4">
-              <Button
-                onClick={handleDownload}
-                size="lg"
-                className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-6 text-lg"
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.2, delay: 0.2 }}
               >
-                <Download className="h-5 w-5" />
-                Download PDF
-              </Button>
+                <h2 className="text-xl lg:text-2xl font-semibold text-foreground mb-2">PDF Merged Successfully!</h2>
+                <p className="text-muted-foreground mb-6 lg:mb-8">
+                  Your files have been combined into a single PDF
+                </p>
+              </motion.div>
                 
-              <Button
-                onClick={handleClearAll}
-                variant="outline"
-                size="lg"
-                className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-6 text-lg"
-              >
-                <Plus className="h-5 w-5" />
-                Merge More PDFs
-              </Button>
-            </div>
-          </div>
-        )}
+              <div className="flex flex-col gap-3 max-w-sm mx-auto">
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.2, delay: 0.3 }}
+                >
+                  <Button
+                    onClick={handleDownload}
+                    size="lg"
+                    className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 py-4 lg:py-5 text-base lg:text-lg transition-all duration-200 ease-out transform-gpu hover:scale-[1.02]"
+                  >
+                    <Download className="h-5 w-5" />
+                    Download PDF
+                  </Button>
+                </motion.div>
+                  
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.2, delay: 0.4 }}
+                >
+                  <Button
+                    onClick={handleClearAll}
+                    variant="outline"
+                    size="lg"
+                    className="w-full gap-2 border-primary/20 hover:bg-primary/5 py-4 lg:py-5 text-base lg:text-lg transition-all duration-200 ease-out transform-gpu hover:scale-[1.02]"
+                  >
+                    <Plus className="h-5 w-5" />
+                    Merge More PDFs
+                  </Button>
+                </motion.div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
-    </div>
+    </motion.div>
   );
 }
