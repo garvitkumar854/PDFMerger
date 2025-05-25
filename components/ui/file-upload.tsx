@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Cloud, FileIcon } from 'lucide-react';
+import { Upload, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // Add these constants at the top level
@@ -158,7 +158,7 @@ export function FileUpload({
             isDragActive 
               ? "border-primary bg-primary/5" 
               : "border-muted/40",
-            "transition-all duration-200 ease-out",
+            "transition-all duration-200 ease-out bg-background/95 shadow-lg backdrop-blur-sm",
             isValidating && "opacity-50 cursor-wait"
           )}
         >
@@ -192,13 +192,28 @@ export function FileUpload({
                 }}
                 className="relative transform-gpu"
               >
-                <Cloud className={cn(
-                  "h-12 w-12 sm:h-16 sm:w-16",
-                  isDragActive 
-                    ? "text-primary" 
-                    : "text-muted-foreground group-hover/upload:text-primary/80",
-                  "transition-colors duration-200 ease-out"
-                )} />
+                <div className="relative">
+                  <Upload className={cn(
+                    "h-12 w-12 sm:h-16 sm:w-16",
+                    isDragActive 
+                      ? "text-primary" 
+                      : "text-muted-foreground group-hover/upload:text-primary/80",
+                    "transition-colors duration-200 ease-out"
+                  )} />
+                  <motion.div
+                    initial={{ scale: 0 }}
+                    animate={{ scale: isDragActive ? 1 : 0 }}
+                    transition={{ 
+                      type: "spring",
+                      stiffness: 500,
+                      damping: 30,
+                      mass: 0.5
+                    }}
+                    className="absolute -bottom-1 -right-1 w-4 h-4 bg-primary rounded-full flex items-center justify-center"
+                  >
+                    <Plus className="h-3 w-3 text-white" />
+                  </motion.div>
+                </div>
               </motion.div>
 
               {/* Text content with animations */}
@@ -225,7 +240,7 @@ export function FileUpload({
                       duration: 0.2,
                       ease: "easeOut"
                     }}
-                    className="text-base sm:text-lg font-medium bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent transform-gpu"
+                    className="text-base sm:text-lg font-medium text-foreground transform-gpu"
                   >
                     {customText?.main || (
                       isValidating ? "Validating files..." :

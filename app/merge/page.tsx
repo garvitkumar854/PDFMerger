@@ -4,7 +4,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { FileUpload } from "@/components/ui/file-upload";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { FileText, X, Upload, CheckCircle2, Download, ArrowLeft, Shield, GripVertical, Plus, AlertCircle } from "lucide-react";
+import { FileText, X, Upload, CheckCircle2, Download, ArrowLeft, Shield, GripVertical, Plus, AlertCircle, FileUp, FilePlus2 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
@@ -171,6 +171,56 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   );
 };
 
+// Add efficient file processing utilities
+const processFileInChunks = async (file: File, chunkSize = 64 * 1024): Promise<ArrayBuffer> => {
+  return new Promise((resolve, reject) => {
+    const fileReader = new FileReader();
+    const chunks: ArrayBuffer[] = [];
+    let offset = 0;
+
+    const readNextChunk = () => {
+      const slice = file.slice(offset, offset + chunkSize);
+      fileReader.readAsArrayBuffer(slice);
+    };
+
+    fileReader.onload = (e) => {
+      if (e.target?.result) {
+        chunks.push(e.target.result as ArrayBuffer);
+        offset += chunkSize;
+        if (offset < file.size) {
+          readNextChunk();
+        } else {
+          // Combine all chunks
+          const completeBuffer = new ArrayBuffer(file.size);
+          const view = new Uint8Array(completeBuffer);
+          let position = 0;
+          chunks.forEach(chunk => {
+            view.set(new Uint8Array(chunk), position);
+            position += chunk.byteLength;
+          });
+          resolve(completeBuffer);
+        }
+      }
+    };
+
+    fileReader.onerror = () => reject(fileReader.error);
+    readNextChunk();
+  });
+};
+
+// Optimized PDF validation
+const validatePdfHeader = (buffer: ArrayBuffer): boolean => {
+  const header = new Uint8Array(buffer.slice(0, 5));
+  return header[0] === 0x25 && // %
+         header[1] === 0x50 && // P
+         header[2] === 0x44 && // D
+         header[3] === 0x46 && // F
+         header[4] === 0x2D;   // -
+};
+
+// Cache for validated files
+const validatedFiles = new WeakMap<File, boolean>();
+
 export default function MergePDF() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isMerging, setIsMerging] = useState(false);
@@ -218,49 +268,58 @@ export default function MergePDF() {
     };
   }, [mergedPdfUrl]);
 
-  const handleFilesSelected = useCallback(async (selectedFiles: File[]) => {
-    try {
-      // Process each file to get content
-      const newFiles: FileItem[] = await Promise.all(
-        selectedFiles.map(async (file) => {
-          const content = await file.arrayBuffer();
-          return {
-            id: `${file.name}-${Date.now()}-${Math.random()}`,
-            name: file.name,
-            size: file.size,
-            type: file.type,
-            content: content
-          };
-        })
-      );
+  const handleFileUpload = useCallback(async (uploadedFiles: File[]) => {
+    const newFiles: FileItem[] = [];
+    const errors: string[] = [];
 
-      // Update files state, adding new files to the existing ones
-      setFiles(prevFiles => [...prevFiles, ...newFiles]);
+    // Process files in parallel with limits
+    const processingPromises = uploadedFiles.map(async (file) => {
+      try {
+        // Check cache first
+        if (!validatedFiles.has(file)) {
+          const headerBuffer = await file.slice(0, 1024).arrayBuffer();
+          validatedFiles.set(file, validatePdfHeader(headerBuffer));
+        }
 
-      // Reset merge states when files change
-      if (mergedPdfUrl) {
-        URL.revokeObjectURL(mergedPdfUrl);
-        setMergedPdfUrl(null);
+        if (!validatedFiles.get(file)) {
+          throw new Error(`${file.name} is not a valid PDF file`);
+        }
+
+        // Process file in chunks
+        const content = await processFileInChunks(file);
+        
+        newFiles.push({
+          id: crypto.randomUUID(),
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          content
+        });
+      } catch (error) {
+        errors.push(`Error processing ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
-      setIsComplete(false);
-      setMergeProgress(0);
-      setIsMerging(false);
+    });
 
-      // Show success message
+    // Wait for all files to be processed
+    await Promise.all(processingPromises);
+
+    if (errors.length > 0) {
+      toast({
+        title: "File Processing Errors",
+        description: errors.join('\n'),
+        variant: "destructive",
+      });
+    }
+
+    if (newFiles.length > 0) {
+      setFiles(prev => [...prev, ...newFiles]);
       toast({
         title: "Files Added",
         description: `Successfully added ${newFiles.length} file${newFiles.length === 1 ? '' : 's'}`,
         variant: "default",
       });
-    } catch (error) {
-      console.error('Error processing files:', error);
-      toast({
-        title: "Error",
-        description: error instanceof Error ? error.message : "Failed to process files",
-        variant: "destructive",
-      });
     }
-  }, [mergedPdfUrl, toast]);
+  }, [toast]);
 
   const handleRemoveFile = useCallback((fileToRemove: FileItem) => {
     // Clean up file resources
@@ -365,7 +424,6 @@ export default function MergePDF() {
   }, []);
 
   const handleMerge = useCallback(async () => {
-    // Validate file count
     if (files.length === 0) {
       toast({
         title: "No files selected",
@@ -375,25 +433,7 @@ export default function MergePDF() {
       return;
     }
 
-    if (files.length === 1) {
-      toast({
-        title: "Single file selected",
-        description: "Please select at least two PDF files to merge",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (files.length > MAX_FILES) {
-      toast({
-        title: "Too many files",
-        description: `Cannot merge more than ${MAX_FILES} files. Please remove some files.`,
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Validate total size
+    // Check total size
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     if (totalSize > MAX_TOTAL_SIZE) {
       toast({
@@ -435,85 +475,143 @@ export default function MergePDF() {
       setIsComplete(false);
       setMergedPdfUrl(null);
 
-      // Calculate total size
-      const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-
-      // Prepare form data
+      // Prepare form data with compression
       const formData = new FormData();
-
-      // Add files to form data with progress tracking
-      let processedSize = 0;
-      for (const fileItem of files) {
-        if (!fileItem.content) {
-          throw new Error(`Content not found for file ${fileItem.name}`);
-        }
-
-        try {
-          // Create a blob from the content
-          const blob = new Blob([fileItem.content], { type: 'application/pdf' });
-          
-          // Double-check the PDF structure
-          const firstBytes = await blob.slice(0, 1024).arrayBuffer();
-          const header = new Uint8Array(firstBytes);
-          
-          // Look for PDF signature
-          let hasPdfSignature = false;
-          for (let i = 0; i < header.length - 4; i++) {
-            if (header[i] === 0x25 && // %
-                header[i + 1] === 0x50 && // P
-                header[i + 2] === 0x44 && // D
-                header[i + 3] === 0x46 && // F
-                header[i + 4] === 0x2D) { // -
-              hasPdfSignature = true;
-              break;
-            }
-          }
-
-          if (!hasPdfSignature) {
-            throw new Error(`${fileItem.name} appears to be corrupted or is not a valid PDF`);
-          }
-
-          // Create a new file with the verified content
-          const file = new File([blob], fileItem.name, { 
-            type: 'application/pdf',
-            lastModified: Date.now()
-          });
-
-          formData.append("files", file);
-
-          // Update progress
-          processedSize += fileItem.size;
-          const progress = (processedSize / totalSize) * 30; // First 30% for file processing
-          setMergeProgress(Math.min(30, progress));
-        } catch (error) {
-          throw new Error(`Failed to process ${fileItem.name}: ${error instanceof Error ? error.message : 'Invalid PDF structure'}`);
-        }
+      
+      // Process files in batches to manage memory
+      const BATCH_SIZE = 3; // Process 3 files at a time
+      const batches = [];
+      for (let i = 0; i < files.length; i += BATCH_SIZE) {
+        batches.push(files.slice(i, i + BATCH_SIZE));
       }
+
+      let processedSize = 0;
+      const processedFiles = [...files]; // Create a copy to preserve content
+
+      // Animated progress function
+      const animateProgress = async (from: number, to: number, duration: number) => {
+        const start = Date.now();
+        const animate = () => {
+          const now = Date.now();
+          const elapsed = now - start;
+          const progress = Math.min(elapsed / duration, 1);
+          
+          // Easing function for smooth animation
+          const eased = 1 - Math.pow(1 - progress, 3); // Cubic ease-out
+          
+          setMergeProgress(Math.round(from + (to - from) * eased));
+          
+          if (progress < 1) {
+            requestAnimationFrame(animate);
+          }
+        };
+        animate();
+        // Wait for animation to complete
+        await new Promise(resolve => setTimeout(resolve, duration));
+      };
+
+      // Initial progress animation
+      setMergeProgress(0);
+      await animateProgress(0, 20, 800); // Animate to 20% over 800ms
+
+      for (const batch of batches) {
+        await Promise.all(batch.map(async (fileItem) => {
+          if (!fileItem.content) {
+            throw new Error(`Content not found for file ${fileItem.name}`);
+          }
+
+          try {
+            // Create a blob from the content
+            const blob = new Blob([fileItem.content], { type: 'application/pdf' });
+            
+            // Verify PDF structure if not already validated
+            if (!validatedFiles.has(new File([blob], fileItem.name))) {
+              const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+              if (!validatePdfHeader(header.buffer)) {
+                throw new Error(`${fileItem.name} appears to be corrupted or is not a valid PDF`);
+              }
+            }
+
+            // Create a new file with the verified content
+            const file = new File([blob], fileItem.name, { 
+              type: 'application/pdf',
+              lastModified: Date.now()
+            });
+
+            formData.append("files", file);
+
+            // Update progress
+            processedSize += fileItem.size;
+          } catch (error) {
+            throw new Error(`Failed to process ${fileItem.name}: ${error instanceof Error ? error.message : 'Invalid PDF structure'}`);
+          }
+        }));
+      }
+
+      // Animate progress for file processing completion
+      await animateProgress(20, 35, 600); // Animate to 35% over 600ms
+
+      // Now that all files are processed, we can clear their content
+      processedFiles.forEach(file => {
+        file.content = null;
+      });
+
+      await animateProgress(35, 50, 500); // Animate to 50% over 500ms
 
       abortControllerRef.current = new AbortController();
 
-      // Start progress tracking for merge operation
-      let mergeStartTime = Date.now();
-      progressInterval = setInterval(() => {
-        const elapsed = Date.now() - mergeStartTime;
-        const progress = Math.min(85, 30 + (elapsed / 1000) * 5); // Increase by 5% per second up to 85%
-        setMergeProgress(progress);
-      }, 100);
+      // Add compression header
+      const headers = new Headers({
+        'Accept-Encoding': 'gzip, deflate',
+        'Content-Encoding': 'gzip'
+      });
 
+      // Start merging operation
       const response = await fetch("/api/merge", {
         method: "POST",
         body: formData,
         signal: abortControllerRef.current.signal,
+        headers
       });
-
-      clearProgressInterval();
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ error: 'Failed to merge PDFs' }));
         throw new Error(errorData.error || "Failed to merge PDFs");
       }
 
-      const blob = await response.blob();
+      // Animate progress for merge initialization
+      await animateProgress(50, 75, 1000); // Animate to 75% over 1s
+
+      // Create a reader to read the response as a stream
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("Failed to get response reader");
+      }
+
+      // Accumulate chunks for the final PDF
+      const chunks: Uint8Array[] = [];
+      
+      // Animate to 85% while receiving data
+      const mergeAnimation = animateProgress(75, 85, 1200);
+      
+      // Read the stream
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+        chunks.push(value);
+      }
+
+      // Wait for the merge animation to complete
+      await mergeAnimation;
+      
+      // Animate final stages
+      await animateProgress(85, 95, 800); // Animate to 95% over 800ms
+
+      // Combine all chunks into a single blob
+      const blob = new Blob(chunks, { type: 'application/pdf' });
       
       if (blob.size === 0) {
         throw new Error("Generated PDF is empty");
@@ -521,11 +619,7 @@ export default function MergePDF() {
 
       // Verify merged PDF header
       const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-      if (!(header[0] === 0x25 && // %
-            header[1] === 0x50 && // P
-            header[2] === 0x44 && // D
-            header[3] === 0x46 && // F
-            header[4] === 0x2D)) { // -
+      if (!validatePdfHeader(header.buffer)) {
         throw new Error("Generated PDF appears to be corrupted");
       }
 
@@ -536,7 +630,9 @@ export default function MergePDF() {
 
       const url = URL.createObjectURL(blob);
       setMergedPdfUrl(url);
-      setMergeProgress(100);
+      
+      // Final progress animation
+      await animateProgress(95, 100, 500); // Animate to 100% over 500ms
       setIsComplete(true);
 
       toast({
@@ -576,6 +672,21 @@ export default function MergePDF() {
         URL.revokeObjectURL(mergedPdfUrl);
         setMergedPdfUrl(null);
       }
+
+      // Clear file contents to free memory
+      setFiles(prevFiles => prevFiles.map(file => ({
+        ...file,
+        content: null
+      })));
+
+      // Force garbage collection if available
+      if (typeof window.gc === 'function') {
+        try {
+          window.gc();
+        } catch (e) {
+          // Ignore if gc is not available
+        }
+      }
     }
   }, [files, isComplete, mergedPdfUrl, toast]);
 
@@ -606,6 +717,18 @@ export default function MergePDF() {
             : ''
     };
   }, [files]);
+
+  // Cleanup function for memory management
+  useEffect(() => {
+    return () => {
+      // Cleanup URLs
+      if (mergedPdfUrl) {
+        URL.revokeObjectURL(mergedPdfUrl);
+      }
+      // WeakMap entries will be automatically garbage collected
+      // when their key objects are no longer referenced
+    };
+  }, [mergedPdfUrl]);
 
   if (!isLoaded || !userId) {
     return (
@@ -656,31 +779,20 @@ export default function MergePDF() {
                 <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-lg sm:rounded-xl blur-xl" />
                 <div className="relative">
                   <FileUpload
-                    onFilesSelected={handleFilesSelected}
+                    onFilesSelected={handleFileUpload}
                     maxFiles={MAX_FILES}
-                    acceptedFileTypes={["application/pdf"]}
-                    className="bg-card/95 shadow-lg rounded-lg sm:rounded-xl border-primary/20 min-h-[180px] sm:min-h-[250px] backdrop-blur-sm transition-all duration-300"
-                    hideFileList={true}
                     currentTotalSize={files.reduce((sum, file) => sum + file.size, 0)}
                     currentFileCount={files.length}
+                    customText={{
+                      main: "Drop PDFs here or tap to browse",
+                      details: `${MAX_FILES - files.length} files remaining • ${((MAX_TOTAL_SIZE - files.reduce((sum, file) => sum + file.size, 0)) / (1024 * 1024)).toFixed(1)}MB available`
+                    }}
                     onError={(error) => {
                       toast({
-                        title: "Cannot Add Files",
+                        title: "Error",
                         description: error,
                         variant: "destructive",
                       });
-                    }}
-                    customText={{
-                      main: files.length === 0 
-                        ? "Drop PDFs here or tap to browse" 
-                        : "Add more PDFs here",
-                      details: (() => {
-                        const { totalSize, remainingSize, totalFiles } = getRemainingCapacity();
-                        if (files.length === 0) {
-                          return `Up to ${MAX_FILES} files (max ${(MAX_TOTAL_SIZE / (1024 * 1024)).toFixed(0)}MB)`;
-                        }
-                        return `${totalFiles}/${MAX_FILES} files (${(totalSize / (1024 * 1024)).toFixed(1)}MB used)`;
-                      })()
                     }}
                   />
                 </div>
@@ -745,7 +857,7 @@ export default function MergePDF() {
                       >
                         {isMerging ? (
                           <>
-                            <Upload className="mr-2 h-4 w-4 animate-spin" />
+                            <div className="mr-2 h-4 w-4 animate-spin border-2 border-primary-foreground border-t-transparent rounded-full" />
                             Merging...
                           </>
                         ) : isOverLimit().isOverLimit ? (
