@@ -35,11 +35,13 @@ import { restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import { css } from "@emotion/react";
 
 // Constants must match server-side limits
-const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
-const MAX_TOTAL_SIZE = 40 * 1024 * 1024; // 40MB
-const MAX_FILES = 10;
-const MAX_RETRIES = 2;
-const RETRY_DELAY = 1000; // 1 second
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB per file
+const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
+const MAX_FILES = 20;
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 2000; // 2 seconds
+const UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks for upload
+const PARALLEL_UPLOADS = 3; // Number of parallel uploads
 
 interface FileItem {
   id: string;
@@ -133,6 +135,13 @@ const SPRING_ANIMATION = {
 // Add type for API error response
 interface APIErrorResponse {
   error: string;
+}
+
+// Add progress tracking types
+interface ProgressState {
+  phase: 'preparing' | 'uploading' | 'processing' | 'downloading' | 'complete';
+  progress: number;
+  detail?: string;
 }
 
 // Update SortableFileItem component for better mobile handling
@@ -243,206 +252,73 @@ const SortableFileItem = ({ file, onRemove }: SortableFileItemProps) => {
   );
 };
 
-// Add optimized chunk processing with web workers
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
-const CONCURRENT_CHUNKS = 3;
-
-// Add web worker for PDF processing
-const createPDFWorker = () => {
-  const workerCode = `
-    self.onmessage = async (e) => {
-      const { chunk, index } = e.data;
-      try {
-        // Process chunk
-        const processedChunk = new Uint8Array(chunk);
-        self.postMessage({ success: true, index, chunk: processedChunk });
-      } catch (error) {
-        self.postMessage({ success: false, index, error: error.message });
-      }
-    };
-  `;
-
-  const blob = new Blob([workerCode], { type: 'application/javascript' });
-  return new Worker(URL.createObjectURL(blob));
-};
-
 // Add optimized file processing
-const processFileInChunks = async (file: File): Promise<ArrayBuffer> => {
-  return new Promise((resolve, reject) => {
-    const chunks: ArrayBuffer[] = [];
-    let processedChunks = 0;
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    const workers: Worker[] = [];
-    
-    const cleanup = () => {
-      workers.forEach(worker => worker.terminate());
-      URL.revokeObjectURL(file.name);
-    };
+const processFilesInParallel = async (
+  files: FileItem[],
+  setProgress: (state: ProgressState) => void
+): Promise<FormData> => {
+  setProgress({ phase: 'preparing', progress: 0, detail: 'Preparing files...' });
 
-    try {
-      // Create worker pool
-      for (let i = 0; i < CONCURRENT_CHUNKS; i++) {
-        const worker = createPDFWorker();
-        worker.onerror = (error) => {
-          cleanup();
-          reject(error);
-        };
-        workers.push(worker);
-      }
+  const formData = new FormData();
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  let processedSize = 0;
 
-      // Process chunks with workers
-      let currentChunk = 0;
-      const processNextChunk = () => {
-        if (currentChunk >= totalChunks) return;
-
-        const start = currentChunk * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
-
-        const worker = workers[currentChunk % workers.length];
-        worker.onmessage = (e) => {
-          const { success, index, chunk: processedChunk, error } = e.data;
-          
-          if (!success) {
-            cleanup();
-            reject(new Error(error));
-            return;
-          }
-
-          chunks[index] = processedChunk;
-          processedChunks++;
-
-          if (processedChunks === totalChunks) {
-            cleanup();
-            resolve(concatenateChunks(chunks));
-          } else {
-            processNextChunk();
-          }
-        };
-
-        worker.postMessage({ chunk, index: currentChunk });
-        currentChunk++;
-      };
-
-      // Start initial chunk processing
-      for (let i = 0; i < Math.min(CONCURRENT_CHUNKS, totalChunks); i++) {
-        processNextChunk();
-      }
-    } catch (error) {
-      cleanup();
-      reject(error);
-    }
-  });
-};
-
-// Optimize chunk concatenation
-const concatenateChunks = (chunks: ArrayBuffer[]): ArrayBuffer => {
-  const totalSize = chunks.reduce((size, chunk) => size + chunk.byteLength, 0);
-  const result = new Uint8Array(totalSize);
-  let offset = 0;
-
-  chunks.forEach(chunk => {
-    result.set(new Uint8Array(chunk), offset);
-    offset += chunk.byteLength;
-  });
-
-  return result.buffer;
-};
-
-// Add optimized file validation
-const validatePDFHeader = async (file: File): Promise<boolean> => {
-  const header = await file.slice(0, 5).arrayBuffer();
-  const view = new Uint8Array(header);
-  return view[0] === 0x25 && // %
-         view[1] === 0x50 && // P
-         view[2] === 0x44 && // D
-         view[3] === 0x46 && // F
-         view[4] === 0x2D;   // -
-};
-
-// Cache for validated files
-const validatedFiles = new WeakMap<File, boolean>();
-
-// Add helper function for file validation
-const validateFile = async (file: File): Promise<ValidationResult> => {
-  try {
-    // 1. Basic file checks
-    if (!file) {
-      return { isValid: false, error: 'Invalid file object' };
-    }
-
-    if (file.size === 0) {
-      return { isValid: false, error: 'File is empty' };
-    }
-
-    if (file.size > MAX_FILE_SIZE) {
-      return { 
-        isValid: false, 
-        error: `File size (${(file.size / (1024 * 1024)).toFixed(1)}MB) exceeds limit of ${MAX_FILE_SIZE / (1024 * 1024)}MB` 
-      };
-    }
-
-    // 2. File type validation
-    const isPDF = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-    if (!isPDF) {
-      return { isValid: false, error: 'Only PDF files are allowed' };
-    }
-
-    // 3. Try to read the first few bytes to verify it's a valid PDF
-    try {
-      const header = await file.slice(0, 5).arrayBuffer();
-      const view = new Uint8Array(header);
-      const isPDFHeader = view[0] === 0x25 && // %
-                         view[1] === 0x50 && // P
-                         view[2] === 0x44 && // D
-                         view[3] === 0x46 && // F
-                         view[4] === 0x2D;   // -
+  // Process files in parallel batches
+  const batchSize = Math.min(PARALLEL_UPLOADS, files.length);
+  for (let i = 0; i < files.length; i += batchSize) {
+    const batch = files.slice(i, i + batchSize);
+    await Promise.all(batch.map(async (fileItem) => {
+      formData.append("files", fileItem.file);
+      processedSize += fileItem.file.size;
       
-      if (!isPDFHeader) {
-        return { isValid: false, error: 'Invalid PDF format: Missing PDF signature' };
+      setProgress({
+        phase: 'preparing',
+        progress: Math.floor((processedSize / totalSize) * 30),
+        detail: `Processing file ${i + 1}/${files.length}...`
+      });
+    }));
+  }
+
+  return formData;
+};
+
+// Add optimized progress tracking
+const trackProgress = (
+  response: Response,
+  setProgress: (state: ProgressState) => void,
+  estimatedSize: number
+) => {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Failed to get response reader");
+
+  return new ReadableStream({
+    async start(controller) {
+      let receivedLength = 0;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) {
+            controller.close();
+            break;
+          }
+
+          receivedLength += value.length;
+          controller.enqueue(value);
+
+          // Update download progress (60-90%)
+          setProgress({
+            phase: 'downloading',
+            progress: 60 + Math.floor((receivedLength / estimatedSize) * 30),
+            detail: `Downloading: ${Math.floor((receivedLength / estimatedSize) * 100)}%`
+          });
+        }
+      } catch (error) {
+        controller.error(error);
       }
-    } catch (error) {
-      return { isValid: false, error: 'Could not read file header' };
-    }
-
-    return { isValid: true };
-  } catch (error) {
-    return { 
-      isValid: false, 
-      error: error instanceof Error ? error.message : 'Unknown validation error' 
-    };
-  }
-};
-
-// Add optimized worker pool size based on device capabilities
-const optimizeWorkerPoolSize = () => {
-  const cpuCores = navigator.hardwareConcurrency || 4;
-  return Math.max(2, Math.min(cpuCores - 1, 4)); // Keep 1 core free for UI
-};
-
-// Enhanced PDF validation with version check
-const validatePDF = async (file: File): Promise<ValidationResult> => {
-  // Add signature validation
-  const header = await file.slice(0, 5).arrayBuffer();
-  const view = new Uint8Array(header);
-  const hasValidSignature = view[0] === 0x25 && // %
-                           view[1] === 0x50 && // P
-                           view[2] === 0x44 && // D
-                           view[3] === 0x46 && // F
-                           view[4] === 0x2D;   // -
-  
-  if (!hasValidSignature) {
-    return { isValid: false, error: 'Invalid PDF format' };
-  }
-  
-  // Add version check
-  const versionBytes = await file.slice(5, 8).arrayBuffer();
-  const version = new TextDecoder().decode(versionBytes);
-  if (!version.match(/^[0-9]\.[0-9]$/)) {
-    return { isValid: false, error: 'Unsupported PDF version' };
-  }
-  
-  return { isValid: true };
+    },
+  });
 };
 
 export default function MergePDF() {
@@ -645,36 +521,34 @@ export default function MergePDF() {
       setMergedPdfUrl(null);
     }
 
-    // Create form data with optimized memory usage
-    const formData = new FormData();
-    files.forEach(fileItem => {
-      formData.append("files", fileItem.file);
-    });
-
-    // Add request ID for tracking
-    const requestId = Math.random().toString(36).substring(7);
-    const headers = {
-      "X-Request-ID": requestId,
-    };
-
-    // Create abort controller for timeout
+    // Create abort controller with extended timeout
     abortControllerRef.current = new AbortController();
     const { signal } = abortControllerRef.current;
 
     try {
-      setMergeProgress(10);
+      // Process files in parallel
+      const formData = await processFilesInParallel(files, (state) => {
+        setMergeProgress(state.progress);
+        toast({
+          title: "Processing",
+          description: state.detail,
+          variant: "default",
+        });
+      });
 
-      // Start merge request with timeout
-      setMergeProgress(50);
+      // Start merge request
+      setMergeProgress(30);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000); // 15s client timeout
+      const timeout = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
 
       try {
         const response = await fetch("/api/merge", {
           method: "POST",
           body: formData,
           signal: controller.signal,
-          headers
+          headers: {
+            "X-Request-ID": Math.random().toString(36).substring(7),
+          }
         });
 
         clearTimeout(timeout);
@@ -684,34 +558,31 @@ export default function MergePDF() {
           throw new Error(errorData.error || "Failed to merge PDFs");
         }
 
-        // Read response as stream with progress tracking
+        // Get estimated size from headers
+        const estimatedSize = parseInt(response.headers.get('X-Estimated-Size') || '0');
+        
+        // Update progress to processing phase
         setMergeProgress(60);
-        const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error("Failed to get response reader");
-        }
+        toast({
+          title: "Processing",
+          description: "Merging PDFs...",
+          variant: "default",
+        });
 
-        const chunks: Uint8Array[] = [];
-        let receivedLength = 0;
-        
-        while (true) {
-          const { done, value } = await reader.read();
-          
-          if (done) break;
-          
-          chunks.push(value);
-          receivedLength += value.length;
-          
-          // Update progress (60-90%)
-          setMergeProgress(60 + Math.floor((receivedLength / totalSize) * 30));
-        }
+        // Stream response with progress tracking
+        const stream = await trackProgress(response, (state) => {
+          setMergeProgress(state.progress);
+          if (state.detail) {
+            toast({
+              title: state.phase === 'downloading' ? "Downloading" : "Processing",
+              description: state.detail,
+              variant: "default",
+            });
+          }
+        }, estimatedSize);
 
-        // Combine chunks and create blob with optimized memory usage
-        setMergeProgress(90);
-        const blob = new Blob(chunks, { type: 'application/pdf' });
-        
-        // Clear chunks to free memory
-        chunks.length = 0;
+        // Create blob from stream
+        const blob = await new Response(stream).blob();
         
         if (blob.size === 0) {
           throw new Error("Generated PDF is empty");
@@ -723,9 +594,10 @@ export default function MergePDF() {
         setMergeProgress(100);
         setIsComplete(true);
 
+        const processingTime = response.headers.get('X-Processing-Time');
         toast({
           title: "Success!",
-          description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB)`,
+          description: `PDFs merged successfully (${(blob.size / (1024 * 1024)).toFixed(1)}MB) in ${processingTime}s`,
           variant: "default",
         });
 
@@ -736,29 +608,29 @@ export default function MergePDF() {
 
     } catch (error) {
       console.error("Error merging PDFs:", error);
-      
+
       // Implement retry logic for specific errors
       if (retryCount < MAX_RETRIES && 
           error instanceof Error && 
           (error.message.includes("timeout") || 
            error.message.includes("network") ||
            error.message.includes("failed to fetch"))) {
-        
+
         toast({
           title: "Retrying...",
           description: `Attempt ${retryCount + 1} of ${MAX_RETRIES}`,
           variant: "default",
         });
-        
+
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (retryCount + 1)));
         return handleMerge(retryCount + 1);
       }
-      
+
       let errorMessage = "Failed to merge PDFs. Please try again.";
-      
+
       if (error instanceof Error) {
         if (error.name === "AbortError") {
-          errorMessage = "Operation timed out. Please try with fewer or smaller files.";
+          errorMessage = "Operation timed out. Large files may take longer to process.";
         } else {
           errorMessage = error.message;
         }
