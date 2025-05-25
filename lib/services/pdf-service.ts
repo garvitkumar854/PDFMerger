@@ -1,11 +1,12 @@
-import { PDFDocument, PDFPage } from 'pdf-lib';
+import { PDFDocument, PDFPage, PDFName, PDFDict } from 'pdf-lib';
 import { createHash } from 'crypto';
 
 // Advanced optimization constants
 const THREAD_POOL_SIZE = Math.max(2, Math.min(navigator?.hardwareConcurrency || 4, 8));
-const PAGE_BATCH_SIZE = 50; // Process 50 pages at once
+const PAGE_BATCH_SIZE = 25; // Reduced batch size for better memory management
 const COMPRESSION_LEVEL = 0.92; // Optimal compression ratio
-const MAX_CONCURRENT_LOADS = 5;
+const MAX_CONCURRENT_LOADS = 3; // Reduced for better stability
+const CLEANUP_INTERVAL = 50; // Clean up after every 50 operations
 
 // Cache for PDF validation and metadata
 const validationCache = new WeakMap<ArrayBuffer, boolean>();
@@ -20,7 +21,6 @@ interface PDFMetadata {
 }
 
 interface ProcessingOptions {
-  compress?: boolean;
   optimizeImages?: boolean;
   removeMetadata?: boolean;
   maxQuality?: number;
@@ -30,10 +30,12 @@ export class PDFService {
   private static instance: PDFService;
   private processingPool: Set<Promise<any>>;
   private loadingPromises: Map<string, Promise<PDFDocument>>;
+  private operationCount: number = 0;
 
   private constructor() {
     this.processingPool = new Set();
     this.loadingPromises = new Map();
+    this.operationCount = 0;
   }
 
   static getInstance(): PDFService {
@@ -83,6 +85,16 @@ export class PDFService {
         capNumbers: true
       });
 
+      // Check for encrypted content
+      if (pdfDoc.isEncrypted) {
+        return { isValid: false, error: 'Invalid PDF: File is encrypted' };
+      }
+
+      // Check for minimum content
+      if (pdfDoc.getPageCount() === 0) {
+        return { isValid: false, error: 'Invalid PDF: No pages found' };
+      }
+
       const metadata: PDFMetadata = {
         pageCount: pdfDoc.getPageCount(),
         isEncrypted: pdfDoc.isEncrypted,
@@ -91,15 +103,18 @@ export class PDFService {
         hasXFA: this.checkForXFA(pdfDoc)
       };
 
-      const isValid = metadata.pageCount > 0;
-      validationCache.set(buffer, isValid);
+      // Cache the results
+      validationCache.set(buffer, true);
       metadataCache.set(buffer, metadata);
 
-      return { isValid, metadata };
+      return { isValid: true, metadata };
     } catch (error) {
+      console.error('PDF validation error:', error);
       return {
         isValid: false,
-        error: error instanceof Error ? error.message : 'PDF validation failed'
+        error: error instanceof Error ? 
+          `Invalid PDF: ${error.message}` : 
+          'PDF validation failed'
       };
     }
   }
@@ -111,112 +126,161 @@ export class PDFService {
     buffers: ArrayBuffer[],
     options: ProcessingOptions = {}
   ): Promise<Uint8Array> {
-    const mergedPdf = await PDFDocument.create({ updateMetadata: false });
-    const loadPromises: Promise<PDFDocument>[] = [];
-    const fileHashes = new Map<string, number>();
-
-    // Load PDFs in parallel with rate limiting
-    for (let i = 0; i < buffers.length; i += MAX_CONCURRENT_LOADS) {
-      const batch = buffers.slice(i, i + MAX_CONCURRENT_LOADS);
-      const batchPromises = batch.map(async (buffer) => {
-        const hash = createHash('sha256').update(new Uint8Array(buffer)).digest('hex');
-        
-        // Reuse already loaded PDFs
-        if (this.loadingPromises.has(hash)) {
-          return this.loadingPromises.get(hash)!;
-        }
-
-        const loadPromise = PDFDocument.load(buffer, {
-          updateMetadata: false,
-          ignoreEncryption: true,
-          throwOnInvalidObject: true,
-          parseSpeed: 1000,
-          capNumbers: true
-        });
-
-        this.loadingPromises.set(hash, loadPromise);
-        fileHashes.set(hash, (fileHashes.get(hash) || 0) + 1);
-
-        return loadPromise;
-      });
-
-      loadPromises.push(...batchPromises);
-      await Promise.all(batchPromises); // Rate limit loading
+    if (!buffers.length) {
+      throw new Error('No PDF buffers provided');
     }
 
-    // Process all PDFs
-    const docs = await Promise.all(loadPromises);
+    try {
+      const mergedPdf = await PDFDocument.create({ 
+        updateMetadata: false 
+      });
+      
+      const loadPromises: Promise<PDFDocument>[] = [];
+      const fileHashes = new Map<string, number>();
 
-    // Process pages in optimized batches
-    for (const doc of docs) {
-      const pageCount = doc.getPageCount();
-      const pageBatches = Math.ceil(pageCount / PAGE_BATCH_SIZE);
-
-      for (let i = 0; i < pageBatches; i++) {
-        const startPage = i * PAGE_BATCH_SIZE;
-        const endPage = Math.min((i + 1) * PAGE_BATCH_SIZE, pageCount);
-        const pageIndices = Array.from(
-          { length: endPage - startPage },
-          (_, idx) => startPage + idx
-        );
-
-        // Copy pages in parallel
-        const pages = await mergedPdf.copyPages(doc, pageIndices);
-        pages.forEach(page => {
-          if (options.optimizeImages) {
-            this.optimizePage(page);
+      // Load PDFs in parallel with rate limiting
+      for (let i = 0; i < buffers.length; i += MAX_CONCURRENT_LOADS) {
+        const batch = buffers.slice(i, i + MAX_CONCURRENT_LOADS);
+        const batchPromises = batch.map(async (buffer) => {
+          const hash = createHash('sha256')
+            .update(new Uint8Array(buffer))
+            .digest('hex');
+          
+          // Reuse already loaded PDFs
+          if (this.loadingPromises.has(hash)) {
+            return this.loadingPromises.get(hash)!;
           }
-          mergedPdf.addPage(page);
+
+          const loadPromise = PDFDocument.load(buffer, {
+            updateMetadata: false,
+            ignoreEncryption: true,
+            throwOnInvalidObject: true,
+            parseSpeed: 1000,
+            capNumbers: true
+          });
+
+          this.loadingPromises.set(hash, loadPromise);
+          fileHashes.set(hash, (fileHashes.get(hash) || 0) + 1);
+
+          return loadPromise;
         });
 
-        // Force garbage collection if available
-        if (global.gc) {
-          global.gc();
+        loadPromises.push(...batchPromises);
+        await Promise.all(batchPromises); // Rate limit loading
+      }
+
+      // Process all PDFs
+      const docs = await Promise.all(loadPromises);
+
+      // Process pages in optimized batches
+      for (const doc of docs) {
+        const pageCount = doc.getPageCount();
+        const pageBatches = Math.ceil(pageCount / PAGE_BATCH_SIZE);
+
+        for (let i = 0; i < pageBatches; i++) {
+          const startPage = i * PAGE_BATCH_SIZE;
+          const endPage = Math.min((i + 1) * PAGE_BATCH_SIZE, pageCount);
+          const pageIndices = Array.from(
+            { length: endPage - startPage },
+            (_, idx) => startPage + idx
+          );
+
+          // Copy pages in parallel
+          const pages = await mergedPdf.copyPages(doc, pageIndices);
+          pages.forEach(page => {
+            if (options.optimizeImages) {
+              this.optimizePage(page);
+            }
+            mergedPdf.addPage(page);
+          });
+
+          // Periodic cleanup
+          this.operationCount++;
+          if (this.operationCount % CLEANUP_INTERVAL === 0) {
+            this.cleanup();
+          }
         }
       }
+
+      // Final cleanup
+      this.cleanup();
+
+      // Optimize output
+      const mergedPdfBytes = await mergedPdf.save({
+        useObjectStreams: true,
+        addDefaultPage: false,
+        objectsPerTick: 200,
+        updateFieldAppearances: false
+      });
+
+      return mergedPdfBytes;
+    } catch (error) {
+      console.error('PDF processing error:', error);
+      this.cleanup(); // Ensure cleanup on error
+      throw error;
     }
-
-    // Clear caches periodically
-    if (this.loadingPromises.size > 100) {
-      this.loadingPromises.clear();
-    }
-
-    // Optimize output
-    const mergedPdfBytes = await mergedPdf.save({
-      useObjectStreams: true,
-      addDefaultPage: false,
-      objectsPerTick: 200,
-      updateFieldAppearances: false
-    });
-
-    return mergedPdfBytes;
   }
 
   /**
    * Optimize individual PDF page
    */
   private optimizePage(page: PDFPage): void {
-    // Implement advanced page optimization if needed
-    // This is a placeholder for future optimizations
+    try {
+      // Remove unnecessary metadata
+      const names = ['PieceInfo', 'Metadata', 'Thumb'].map(name => 
+        PDFName.of(name)
+      );
+      
+      for (const name of names) {
+        if (page.node.has(name)) {
+          page.node.delete(name);
+        }
+      }
+    } catch (error) {
+      console.warn('Page optimization warning:', error);
+    }
   }
 
   /**
    * Check for XFA forms (which can cause issues)
    */
   private checkForXFA(doc: PDFDocument): boolean {
-    // Implement XFA form detection
-    // This is a placeholder for future implementation
-    return false;
+    try {
+      const catalog = doc.context.lookup(doc.context.trailerInfo.Root);
+      if (!(catalog instanceof PDFDict)) return false;
+
+      const acroForm = catalog.lookup(PDFName.of('AcroForm'));
+      if (!(acroForm instanceof PDFDict)) return false;
+
+      return acroForm.has(PDFName.of('XFA'));
+    } catch {
+      return false;
+    }
   }
 
   /**
    * Clean up resources
    */
   cleanup(): void {
-    this.loadingPromises.clear();
-    this.processingPool.clear();
-    if (global.gc) {
-      global.gc();
+    try {
+      // Clear caches if they're too large
+      if (this.loadingPromises.size > 100) {
+        this.loadingPromises.clear();
+      }
+
+      this.processingPool.clear();
+      
+      // Reset operation count periodically
+      if (this.operationCount > 1000) {
+        this.operationCount = 0;
+      }
+
+      // Force garbage collection if available
+      if (global.gc) {
+        global.gc();
+      }
+    } catch (error) {
+      console.warn('Cleanup warning:', error);
     }
   }
 } 

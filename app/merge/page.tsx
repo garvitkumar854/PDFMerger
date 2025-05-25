@@ -42,6 +42,14 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000; // 2 seconds
 const UPLOAD_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks for upload
 const PARALLEL_UPLOADS = 3; // Number of parallel uploads
+const RETRY_ATTEMPTS = 3;
+const NETWORK_ERRORS = [
+  'failed to fetch',
+  'network',
+  'timeout',
+  'connection',
+  'offline'
+];
 
 interface FileItem {
   id: string;
@@ -547,10 +555,10 @@ export default function MergePDF() {
         });
       });
 
-      // Start merge request
+      // Start merge request with retry logic
       setMergeProgress(30);
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
+      const timeout = setTimeout(() => controller.abort(), 55000); // 55-second timeout
 
       try {
         const response = await fetch("/api/merge", {
@@ -559,14 +567,21 @@ export default function MergePDF() {
           signal: controller.signal,
           headers: {
             "X-Request-ID": Math.random().toString(36).substring(7),
+            "X-Retry-Count": retryCount.toString()
           }
         });
 
         clearTimeout(timeout);
 
         if (!response.ok) {
-          const errorData = await response.json() as APIErrorResponse;
+          const errorData = await response.json();
           throw new Error(errorData.error || "Failed to merge PDFs");
+        }
+
+        // Validate response headers
+        const contentType = response.headers.get('Content-Type');
+        if (!contentType?.includes('application/pdf')) {
+          throw new Error('Invalid response format');
         }
 
         // Get estimated size from headers
@@ -580,7 +595,7 @@ export default function MergePDF() {
           variant: "default",
         });
 
-        // Stream response with progress tracking
+        // Stream response with progress tracking and validation
         const stream = await trackProgress(response, (state) => {
           setMergeProgress(state.progress);
           if (state.detail) {
@@ -592,11 +607,24 @@ export default function MergePDF() {
           }
         }, estimatedSize);
 
-        // Create blob from stream
+        // Create and validate blob
         const blob = await new Response(stream).blob();
         
         if (blob.size === 0) {
           throw new Error("Generated PDF is empty");
+        }
+
+        // Validate PDF header
+        const arrayBuffer = await blob.arrayBuffer();
+        const header = new Uint8Array(arrayBuffer.slice(0, 5));
+        const isPDF = header[0] === 0x25 && // %
+                      header[1] === 0x50 && // P
+                      header[2] === 0x44 && // D
+                      header[3] === 0x46 && // F
+                      header[4] === 0x2D;   // -
+        
+        if (!isPDF) {
+          throw new Error("Invalid PDF format");
         }
 
         // Create URL and finish
@@ -620,36 +648,43 @@ export default function MergePDF() {
     } catch (error) {
       console.error("Error merging PDFs:", error);
 
-      // Implement retry logic for specific errors
-      if (retryCount < MAX_RETRIES && 
-          error instanceof Error && 
-          (error.message.includes("timeout") || 
-           error.message.includes("network") ||
-           error.message.includes("failed to fetch"))) {
+      const errorMessage = error instanceof Error ? error.message.toLowerCase() : '';
+      const shouldRetry = retryCount < RETRY_ATTEMPTS && 
+        (NETWORK_ERRORS.some(err => errorMessage.includes(err)) ||
+         errorMessage.includes('unexpected token') ||
+         errorMessage.includes('invalid pdf'));
 
+      if (shouldRetry) {
         toast({
           title: "Retrying...",
-          description: `Attempt ${retryCount + 1} of ${MAX_RETRIES}`,
+          description: `Attempt ${retryCount + 1} of ${RETRY_ATTEMPTS}. Please wait...`,
           variant: "default",
         });
 
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (retryCount + 1)));
+        // Exponential backoff
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * Math.pow(2, retryCount)));
         return handleMerge(retryCount + 1);
       }
 
-      let errorMessage = "Failed to merge PDFs. Please try again.";
+      let userErrorMessage = "Failed to merge PDFs. Please try again.";
 
       if (error instanceof Error) {
-        if (error.name === "AbortError") {
-          errorMessage = "Operation timed out. Large files may take longer to process.";
+        if (error.message.toLowerCase().includes('timeout')) {
+          userErrorMessage = "Operation timed out. Try with fewer or smaller files.";
+        } else if (error.message.toLowerCase().includes('unexpected token')) {
+          userErrorMessage = "One or more PDFs appear to be corrupted. Please verify your files.";
+        } else if (error.message.toLowerCase().includes('network')) {
+          userErrorMessage = "Network error occurred. Please check your connection.";
+        } else if (error.message.toLowerCase().includes('invalid pdf')) {
+          userErrorMessage = "Invalid PDF format detected. Please verify your files.";
         } else {
-          errorMessage = error.message;
+          userErrorMessage = error.message;
         }
       }
 
       toast({
         title: "Error",
-        description: errorMessage,
+        description: userErrorMessage,
         variant: "destructive",
         duration: 5000,
       });
@@ -663,7 +698,9 @@ export default function MergePDF() {
       }
     } finally {
       setIsMerging(false);
-      abortControllerRef.current = null;
+      if (abortControllerRef.current) {
+        abortControllerRef.current = null;
+      }
     }
   }, [files, mergedPdfUrl, toast]);
 
