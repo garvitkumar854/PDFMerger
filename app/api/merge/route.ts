@@ -14,7 +14,7 @@ const PAGE_PROCESSING_DELAY = 50; // 50ms delay between page batches
 // Route configuration
 export const runtime = 'nodejs';
 export const preferredRegion = ['fra1'];
-export const maxDuration = 300;
+export const maxDuration = 60; // Maximum allowed duration for Vercel hobby plan
 
 // Helper function to get optimal chunk size based on available memory
 const getOptimalChunkSize = (totalSize: number, deviceType: string) => {

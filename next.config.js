@@ -25,7 +25,7 @@ const nextConfig = {
   },
   serverRuntimeConfig: {
     // Will only be available on the server side
-    maxDuration: 300, // 5 minutes in seconds
+    maxDuration: 60, // Maximum allowed duration for Vercel hobby plan
   },
   publicRuntimeConfig: {
     // Will be available on both server and client
