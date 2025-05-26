@@ -3,17 +3,15 @@
   "builds": [
     {
       "src": "package.json",
-      "use": "@vercel/next",
-      "config": {
-        "functions": {
-          "api/merge.js": {
-            "maxDuration": 60
-          }
-        }
-      }
+      "use": "@vercel/next"
     }
   ],
   "regions": ["iad1"],
+  "functions": {
+    "app/api/merge/route.ts": {
+      "maxDuration": 60
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",
