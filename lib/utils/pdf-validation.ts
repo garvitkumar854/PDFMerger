@@ -100,39 +100,42 @@ export function clearValidationCache(): void {
  */
 export const validatePDF = async (buffer: Uint8Array): Promise<boolean> => {
   try {
-    // Quick header check first
-    if (buffer.length < 67) return false;
+    // Minimal size check
+    if (buffer.length < 32) return false;
     
-    const headerValid = buffer[0] === 0x25 && // %
-                       buffer[1] === 0x50 && // P
-                       buffer[2] === 0x44 && // D
-                       buffer[3] === 0x46 && // F
-                       buffer[4] === 0x2D;   // -
-    
-    if (!headerValid) return false;
+    // Fast header check using DataView for better performance
+    const view = new DataView(buffer.buffer);
+    if (!(view.getUint8(0) === 0x25 && // %
+          view.getUint8(1) === 0x50 && // P
+          view.getUint8(2) === 0x44 && // D
+          view.getUint8(3) === 0x46 && // F
+          view.getUint8(4) === 0x2D))  // -
+    {
+      return false;
+    }
 
-    // Optimized PDF loading for validation
+    // Quick EOF check in last 1024 bytes for faster validation
+    const tail = buffer.slice(-Math.min(1024, buffer.length));
+    if (!new TextDecoder().decode(tail).includes('%%EOF')) {
+      return false;
+    }
+
+    // Optimized PDF loading with dynamic parse speed
     const pdfDoc = await PDFDocument.load(buffer, {
       ignoreEncryption: true,
       updateMetadata: false,
-      throwOnInvalidObject: true,
-      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 4000 : 1500
+      throwOnInvalidObject: false,
+      parseSpeed: buffer.length < 20 * 1024 * 1024 ? 6000 : 3000
     });
 
-    // Basic structure validation
+    // Quick structure validation
     if (pdfDoc.getPageCount() === 0) return false;
 
-    // Quick check of first and last pages
-    const pages = pdfDoc.getPages();
-    const firstPage = pages[0];
-    const lastPage = pages[pages.length - 1];
-
-    const validatePage = (page: any) => {
-      const { width, height } = page.getSize();
-      return width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height);
-    };
-
-    return validatePage(firstPage) && validatePage(lastPage);
+    // Only check first page metadata for speed
+    const firstPage = pdfDoc.getPage(0);
+    const { width, height } = firstPage.getSize();
+    
+    return width > 0 && height > 0;
   } catch {
     return false;
   }
@@ -143,49 +146,41 @@ export const validatePDF = async (buffer: Uint8Array): Promise<boolean> => {
  */
 export const isPDFCorrupted = async (buffer: Uint8Array): Promise<boolean> => {
   try {
-    // Quick size check
-    if (buffer.length < 67) return true;
+    // Quick size validation
+    if (buffer.length < 32) return true;
 
-    // Check PDF header
-    const headerValid = buffer[0] === 0x25 && // %
-                       buffer[1] === 0x50 && // P
-                       buffer[2] === 0x44 && // D
-                       buffer[3] === 0x46 && // F
-                       buffer[4] === 0x2D;   // -
+    // Fast header check using DataView
+    const view = new DataView(buffer.buffer);
+    const headerValid = view.getUint8(0) === 0x25 && // %
+                       view.getUint8(1) === 0x50 && // P
+                       view.getUint8(2) === 0x44 && // D
+                       view.getUint8(3) === 0x46 && // F
+                       view.getUint8(4) === 0x2D;   // -
     
     if (!headerValid) return true;
 
-    // Check for EOF marker in last 1024 bytes
-    const tail = buffer.slice(-1024);
-    const hasEOF = new TextDecoder().decode(tail).includes('%%EOF');
-    if (!hasEOF) return true;
+    // Quick EOF check
+    const tail = buffer.slice(-Math.min(1024, buffer.length));
+    if (!new TextDecoder().decode(tail).includes('%%EOF')) return true;
 
     // Load PDF with optimized settings
     const pdfDoc = await PDFDocument.load(buffer, {
       ignoreEncryption: true,
       updateMetadata: false,
       throwOnInvalidObject: false,
-      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 4000 : 1500
+      parseSpeed: buffer.length < 20 * 1024 * 1024 ? 6000 : 3000
     });
 
-    // Verify basic structure
+    // Basic structure check
     if (pdfDoc.getPageCount() === 0) return true;
 
-    // Check first and last pages only for better performance
+    // Only check first and last page for speed
     const pages = pdfDoc.getPages();
     const checkPages = [pages[0], pages[pages.length - 1]];
 
     for (const page of checkPages) {
-      try {
-        const { width, height } = page.getSize();
-        if (!width || !height || width <= 0 || height <= 0) return true;
-
-        // Quick content check
-        const content = page.node.Contents();
-        if (!content) return true;
-      } catch {
-        return true;
-      }
+      const { width, height } = page.getSize();
+      if (!width || !height || width <= 0 || height <= 0) return true;
     }
 
     return false;
@@ -199,37 +194,40 @@ export const isPDFCorrupted = async (buffer: Uint8Array): Promise<boolean> => {
  */
 export const estimatePDFMemoryUsage = async (buffer: Uint8Array): Promise<number> => {
   try {
+    // Quick size-based estimation for small files
+    if (buffer.length < 15 * 1024 * 1024) {
+      return Math.ceil(buffer.length * 2); // Conservative estimate for small files
+    }
+
     const pdfDoc = await PDFDocument.load(buffer, {
       ignoreEncryption: true,
       updateMetadata: false,
       throwOnInvalidObject: false,
-      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 4000 : 1500
+      parseSpeed: 2000
     });
 
     const pageCount = pdfDoc.getPageCount();
     const totalSize = buffer.length;
 
-    // Enhanced memory estimation based on file characteristics
-    const baseMemory = totalSize * 1.5; // Base memory for PDF structure
-    const pageMemory = pageCount * 512 * 1024; // 512KB per page estimate
-    const metadataMemory = Math.min(totalSize * 0.1, 5 * 1024 * 1024); // Max 5MB for metadata
+    // Optimized memory estimation
+    const baseMemory = totalSize * 1.2; // Reduced from 1.5
+    const pageMemory = pageCount * 256 * 1024; // Reduced from 512KB to 256KB per page
+    const metadataMemory = Math.min(totalSize * 0.05, 2 * 1024 * 1024); // Reduced from 5MB to 2MB
     
-    // Additional memory for processing overhead
+    // Reduced processing buffer
     const processingBuffer = Math.min(
-      totalSize * 0.2, // 20% of file size
-      50 * 1024 * 1024 // Max 50MB buffer
+      totalSize * 0.15, // Reduced from 0.2
+      30 * 1024 * 1024 // Reduced from 50MB to 30MB
     );
 
-    // Calculate total estimated memory
+    // Calculate total estimated memory with reduced safety margin
     const estimatedMemory = baseMemory + pageMemory + metadataMemory + processingBuffer;
-
-    // Add safety margin for very large files
-    const safetyMargin = totalSize > 50 * 1024 * 1024 ? 1.2 : 1.1;
+    const safetyMargin = totalSize > 50 * 1024 * 1024 ? 1.1 : 1.05; // Reduced margins
     
     return Math.ceil(estimatedMemory * safetyMargin);
   } catch {
     // Fallback estimation if analysis fails
-    return Math.ceil(buffer.length * 2.5);
+    return Math.ceil(buffer.length * 2);
   }
 };
 

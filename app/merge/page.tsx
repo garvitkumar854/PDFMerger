@@ -488,6 +488,30 @@ export default function MergePDF() {
     }
   }, []);
 
+  // Progress simulation function
+  const simulateProgress = useCallback((
+    start: number, 
+    end: number, 
+    duration: number,
+    progressInterval: NodeJS.Timeout | undefined,
+    setProgress: (value: number) => void
+  ) => {
+    const step = (end - start) / (duration / 100); // Update every 100ms
+    let currentProgress = start;
+    
+    return new Promise<NodeJS.Timeout>((resolve) => {
+      const interval = setInterval(() => {
+        currentProgress = Math.min(currentProgress + step, end);
+        setProgress(Math.floor(currentProgress));
+        
+        if (currentProgress >= end) {
+          clearInterval(interval);
+          resolve(interval);
+        }
+      }, 100);
+    });
+  }, []);
+
   const handleMerge = useCallback(async (retryCount = 0) => {
     if (!files.length) return;
 
@@ -503,6 +527,7 @@ export default function MergePDF() {
 
     setIsMerging(true);
     setMergeProgress(0);
+    let progressInterval: NodeJS.Timeout | undefined;
 
     // Clear previous merged PDF URL
     if (mergedPdfUrl) {
@@ -516,12 +541,15 @@ export default function MergePDF() {
       const expectedProcessingTime = estimateProcessingTime(totalSize, totalPages, files.length);
       console.log(`[PDF Merge] Expected processing time: ${expectedProcessingTime}s`);
 
+      // Stage 1: Initial preparation (0-10%)
+      progressInterval = await simulateProgress(0, 10, 1000, progressInterval, setMergeProgress);
+
+      // Stage 2: File validation (10-25%)
+      progressInterval = await simulateProgress(10, 25, 1500, progressInterval, setMergeProgress);
+
       // Process files with progress tracking
       const formData = new FormData();
       files.forEach(file => formData.append('files', file.file));
-      
-      // Initial progress for file preparation
-      setMergeProgress(5);
 
       const response = await fetch("/api/merge", {
         method: "POST",
@@ -554,7 +582,7 @@ export default function MergePDF() {
         throw new Error(errorData.error || "Failed to merge PDFs");
       }
 
-      // Stream response with improved progress tracking
+      // Stage 3: Processing response (25-60%)
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Failed to get response reader");
 
@@ -563,6 +591,7 @@ export default function MergePDF() {
       const contentLength = parseInt(response.headers.get('Content-Length') || '0');
       const startTime = Date.now();
 
+      // Stage 4: Reading and processing chunks (60-85%)
       while (true) {
         const { done, value } = await reader.read();
         
@@ -571,25 +600,25 @@ export default function MergePDF() {
         chunks.push(value);
         receivedLength += value.length;
         
-        // Calculate progress based on time and size
-        const elapsedTime = (Date.now() - startTime) / 1000;
-        const timeProgress = Math.min((elapsedTime / expectedProcessingTime) * 100, 95);
-        const sizeProgress = (receivedLength / contentLength) * 100;
-        
-        // Use weighted average of time and size progress
-        const weightedProgress = Math.min(
-          timeProgress * 0.3 + sizeProgress * 0.7,
-          99
+        // Calculate progress for chunk processing
+        const chunkProgress = Math.min(
+          60 + ((receivedLength / contentLength) * 25),
+          85
         );
-        
-        setMergeProgress(Math.floor(weightedProgress));
+        setMergeProgress(Math.floor(chunkProgress));
       }
+
+      // Stage 5: Final processing (85-95%)
+      progressInterval = await simulateProgress(85, 95, 1000, progressInterval, setMergeProgress);
 
       // Create blob and URL
       const blob = new Blob(chunks, { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
+      
+      // Stage 6: Completion (95-100%)
+      progressInterval = await simulateProgress(95, 100, 500, progressInterval, setMergeProgress);
+      
       setMergedPdfUrl(url);
-      setMergeProgress(100);
       setIsComplete(true);
 
       const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -619,9 +648,12 @@ export default function MergePDF() {
         setMergedPdfUrl(null);
       }
     } finally {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+      }
       setIsMerging(false);
     }
-  }, [files, mergedPdfUrl, toast]);
+  }, [files, mergedPdfUrl, toast, simulateProgress]);
 
   // Helper function to calculate total pages
   const calculateTotalPages = async (files: FileItem[]): Promise<number> => {

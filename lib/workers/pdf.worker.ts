@@ -7,19 +7,32 @@ const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for streaming
 const MAX_PROCESSING_TIME = 180000; // 3 minutes
 const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 const MEMORY_LIMIT = 1024 * 1024 * 1024; // 1GB worker memory limit
+const CLEANUP_INTERVAL = 30000; // 30 seconds
 
 // Initialize PDF service with enhanced settings
 const pdfService = PDFService.getInstance();
 
 // Track memory usage
 let currentMemoryUsage = 0;
+let lastCleanupTime = 0;
 
-// Enhanced memory management
+// Enhanced memory management with cross-browser support
 const checkMemoryUsage = () => {
-  if (global.performance && performance.memory) {
-    currentMemoryUsage = performance.memory.usedJSHeapSize;
-    if (currentMemoryUsage > MEMORY_LIMIT * 0.9) {
+  try {
+    // @ts-ignore - Chrome-specific memory API
+    if (global.performance && performance.memory) {
+      // @ts-ignore
+      currentMemoryUsage = performance.memory.usedJSHeapSize;
+      if (currentMemoryUsage > MEMORY_LIMIT * 0.9) {
+        cleanup();
+      }
+    }
+  } catch {
+    // Fallback for browsers without memory API
+    // Use a simple timeout-based cleanup strategy
+    if (Date.now() - lastCleanupTime > CLEANUP_INTERVAL) {
       cleanup();
+      lastCleanupTime = Date.now();
     }
   }
 };

@@ -3,7 +3,7 @@
 import React, { useEffect, useRef } from 'react';
 import { motion, AnimatePresence, useSpring } from 'framer-motion';
 
-type ProgressStage = 'uploading' | 'processing' | 'merging' | 'finalizing' | 'complete' | 'idle';
+export type ProgressStage = 'uploading' | 'preparing' | 'validating' | 'processing' | 'merging' | 'finalizing' | 'complete' | 'idle';
 
 interface ProgressBarProps {
   progress: number;
@@ -18,7 +18,7 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
   isProcessing, 
   totalFiles,
   currentFile,
-  stage 
+  stage
 }) => {
   const progressSpring = useSpring(0, {
     stiffness: 100,
@@ -26,119 +26,77 @@ const ProgressBar: React.FC<ProgressBarProps> = ({
     restDelta: 0.001
   });
 
-  const prevStageRef = useRef<ProgressStage>('idle');
-  const stageProgress = useRef<{ [key in ProgressStage]: number }>({
-    idle: 0,
-    uploading: 0,
-    processing: 0,
-    merging: 0,
-    finalizing: 0,
-    complete: 100
-  });
-
-  // Update progress spring smoothly
   useEffect(() => {
     progressSpring.set(progress);
   }, [progress, progressSpring]);
 
-  // Handle stage transitions
-  useEffect(() => {
-    if (stage !== prevStageRef.current) {
-      // Store progress for the previous stage
-      stageProgress.current[prevStageRef.current] = progress;
-      prevStageRef.current = stage;
-    }
-  }, [stage, progress]);
-
-  // Calculate the progress text to display
-  const getProgressText = () => {
-    if (!isProcessing) return 'Ready to merge';
-    
+  // Get stage color
+  const getStageColor = (stage: ProgressStage) => {
     switch (stage) {
       case 'uploading':
-        return `Uploading file ${currentFile} of ${totalFiles} (${Math.round(progress)}%)`;
-      case 'processing':
-        return `Processing files (${Math.round(progress)}%)`;
-      case 'merging':
-        return `Merging PDFs (${Math.round(progress)}%)`;
-      case 'finalizing':
-        return 'Finalizing your PDF...';
-      case 'complete':
-        return 'Merge complete!';
-      default:
-        return `Processing file ${currentFile} of ${totalFiles} (${Math.round(progress)}%)`;
-    }
-  };
-
-  // Get stage-specific color
-  const getStageColor = () => {
-    switch (stage) {
-      case 'uploading':
+        return 'bg-blue-400';
+      case 'preparing':
         return 'bg-blue-500';
-      case 'processing':
+      case 'validating':
         return 'bg-purple-500';
-      case 'merging':
+      case 'processing':
         return 'bg-green-500';
-      case 'finalizing':
+      case 'merging':
         return 'bg-yellow-500';
+      case 'finalizing':
+        return 'bg-orange-500';
       case 'complete':
         return 'bg-emerald-500';
       default:
-        return 'bg-blue-500';
+        return 'bg-gray-500';
+    }
+  };
+
+  // Get stage text
+  const getStageText = (stage: ProgressStage) => {
+    switch (stage) {
+      case 'uploading':
+        return 'Uploading files...';
+      case 'preparing':
+        return 'Preparing files...';
+      case 'validating':
+        return 'Validating PDFs...';
+      case 'processing':
+        return `Processing file ${currentFile} of ${totalFiles}`;
+      case 'merging':
+        return 'Merging PDFs...';
+      case 'finalizing':
+        return 'Finalizing...';
+      case 'complete':
+        return 'Complete!';
+      default:
+        return 'Ready';
     }
   };
 
   return (
     <div className="w-full space-y-2">
-      <div className="relative h-4 w-full bg-gray-200 rounded-full overflow-hidden">
-        <motion.div
-          className={`h-full ${getStageColor()}`}
-          style={{ width: progressSpring }}
-          transition={{
-            type: "spring",
-            stiffness: 100,
-            damping: 30
-          }}
-        />
-        {/* Animated gradient overlay for processing effect */}
-        <AnimatePresence>
-          {isProcessing && progress < 100 && (
-            <motion.div
-              initial={{ x: '-100%', opacity: 0 }}
-              animate={{ 
-                x: '100%', 
-                opacity: [0, 1, 1, 0],
-                transition: {
-                  x: {
-                    repeat: Infinity,
-                    duration: 1.5,
-                    ease: "linear"
-                  },
-                  opacity: {
-                    repeat: Infinity,
-                    duration: 1.5,
-                    times: [0, 0.2, 0.8, 1]
-                  }
-                }
-              }}
-              exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent"
-            />
-          )}
+      <div className="flex justify-between text-sm text-gray-600 dark:text-gray-400">
+        <AnimatePresence mode="wait">
+          <motion.span
+            key={stage}
+            initial={{ opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -5 }}
+            transition={{ duration: 0.2 }}
+          >
+            {getStageText(stage)}
+          </motion.span>
         </AnimatePresence>
+        <span>{Math.round(progress)}%</span>
       </div>
-      <motion.div 
-        className="text-sm text-gray-600 text-center"
-        initial={{ opacity: 0, y: 5 }}
-        animate={{ opacity: 1, y: 0 }}
-        key={stage} // Trigger animation on stage change
-        transition={{
-          duration: 0.2,
-          ease: "easeOut"
-        }}
-      >
-        {getProgressText()}
-      </motion.div>
+      <div className="h-2 bg-gray-200 rounded-full dark:bg-gray-700 overflow-hidden">
+        <motion.div
+          className={`h-full rounded-full ${getStageColor(stage)}`}
+          style={{ width: `${progress}%` }}
+          transition={{ type: "spring", stiffness: 100, damping: 30 }}
+        />
+      </div>
     </div>
   );
 };
