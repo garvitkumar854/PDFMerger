@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
   // Set timeout for the entire operation
   const timeout = setTimeout(() => {
     controller.abort();
-  }, 270000); // 4.5 minutes to ensure we stay within Vercel's 5-minute limit
+  }, 55000); // 55 seconds to ensure we stay within Vercel's 60-second limit
 
   try {
     console.log('[PDF Merge] Starting new merge request');
