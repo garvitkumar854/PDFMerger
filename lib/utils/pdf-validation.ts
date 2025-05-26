@@ -2,6 +2,8 @@
  * Utility functions for PDF validation
  */
 
+import { PDFDocument } from 'pdf-lib';
+
 // Cache for validation results
 const validationCache = new WeakMap<ArrayBuffer, boolean>();
 
@@ -96,66 +98,140 @@ export function clearValidationCache(): void {
  * @param data PDF file data as Uint8Array
  * @returns Promise that resolves if PDF is valid, rejects if invalid
  */
-export async function validatePDF(data: Uint8Array): Promise<void> {
-  // Check PDF header
-  if (data.length < 5) {
-    throw new Error('File too small to be a valid PDF');
-  }
+export const validatePDF = async (buffer: Uint8Array): Promise<boolean> => {
+  try {
+    // Quick header check first
+    if (buffer.length < 67) return false;
+    
+    const headerValid = buffer[0] === 0x25 && // %
+                       buffer[1] === 0x50 && // P
+                       buffer[2] === 0x44 && // D
+                       buffer[3] === 0x46 && // F
+                       buffer[4] === 0x2D;   // -
+    
+    if (!headerValid) return false;
 
-  const header = String.fromCharCode(...data.slice(0, 5));
-  if (header !== '%PDF-') {
-    throw new Error('Invalid PDF header');
-  }
+    // Optimized PDF loading for validation
+    const pdfDoc = await PDFDocument.load(buffer, {
+      ignoreEncryption: true,
+      updateMetadata: false,
+      throwOnInvalidObject: true,
+      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 4000 : 1500
+    });
 
-  // Check for EOF marker
-  const tail = String.fromCharCode(...data.slice(-6));
-  if (!tail.includes('%%EOF')) {
-    throw new Error('Invalid PDF EOF marker');
-  }
+    // Basic structure validation
+    if (pdfDoc.getPageCount() === 0) return false;
 
-  // Check for xref table
-  const content = String.fromCharCode(...data);
-  if (!content.includes('xref')) {
-    throw new Error('Missing xref table');
-  }
+    // Quick check of first and last pages
+    const pages = pdfDoc.getPages();
+    const firstPage = pages[0];
+    const lastPage = pages[pages.length - 1];
 
-  // Basic structure validation passed
-  return Promise.resolve();
-}
+    const validatePage = (page: any) => {
+      const { width, height } = page.getSize();
+      return width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height);
+    };
+
+    return validatePage(firstPage) && validatePage(lastPage);
+  } catch {
+    return false;
+  }
+};
 
 /**
- * Checks if a PDF file might be corrupted
- * @param data PDF file data
- * @returns true if file appears corrupted
+ * Checks if a PDF file appears to be corrupted
  */
-export function isPDFCorrupted(data: Uint8Array): boolean {
+export const isPDFCorrupted = async (buffer: Uint8Array): Promise<boolean> => {
   try {
-    // Check for common corruption patterns
-    const content = String.fromCharCode(...data);
+    // Quick size check
+    if (buffer.length < 67) return true;
+
+    // Check PDF header
+    const headerValid = buffer[0] === 0x25 && // %
+                       buffer[1] === 0x50 && // P
+                       buffer[2] === 0x44 && // D
+                       buffer[3] === 0x46 && // F
+                       buffer[4] === 0x2D;   // -
     
-    // Check for truncated file
-    if (!content.includes('%%EOF')) {
-      return true;
-    }
+    if (!headerValid) return true;
 
-    // Check for missing objects
-    const objCount = (content.match(/\d+\s+\d+\s+obj/g) || []).length;
-    if (objCount === 0) {
-      return true;
-    }
+    // Check for EOF marker in last 1024 bytes
+    const tail = buffer.slice(-1024);
+    const hasEOF = new TextDecoder().decode(tail).includes('%%EOF');
+    if (!hasEOF) return true;
 
-    // Check for broken xref
-    const xrefMatch = content.match(/xref\s+\d+\s+\d+/);
-    if (!xrefMatch) {
-      return true;
+    // Load PDF with optimized settings
+    const pdfDoc = await PDFDocument.load(buffer, {
+      ignoreEncryption: true,
+      updateMetadata: false,
+      throwOnInvalidObject: false,
+      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 4000 : 1500
+    });
+
+    // Verify basic structure
+    if (pdfDoc.getPageCount() === 0) return true;
+
+    // Check first and last pages only for better performance
+    const pages = pdfDoc.getPages();
+    const checkPages = [pages[0], pages[pages.length - 1]];
+
+    for (const page of checkPages) {
+      try {
+        const { width, height } = page.getSize();
+        if (!width || !height || width <= 0 || height <= 0) return true;
+
+        // Quick content check
+        const content = page.node.Contents();
+        if (!content) return true;
+      } catch {
+        return true;
+      }
     }
 
     return false;
-  } catch (error) {
-    // If we can't even parse the content, consider it corrupted
+  } catch {
     return true;
   }
-}
+};
+
+/**
+ * Estimates the memory usage for processing a PDF with enhanced accuracy
+ */
+export const estimatePDFMemoryUsage = async (buffer: Uint8Array): Promise<number> => {
+  try {
+    const pdfDoc = await PDFDocument.load(buffer, {
+      ignoreEncryption: true,
+      updateMetadata: false,
+      throwOnInvalidObject: false,
+      parseSpeed: buffer.length < 10 * 1024 * 1024 ? 4000 : 1500
+    });
+
+    const pageCount = pdfDoc.getPageCount();
+    const totalSize = buffer.length;
+
+    // Enhanced memory estimation based on file characteristics
+    const baseMemory = totalSize * 1.5; // Base memory for PDF structure
+    const pageMemory = pageCount * 512 * 1024; // 512KB per page estimate
+    const metadataMemory = Math.min(totalSize * 0.1, 5 * 1024 * 1024); // Max 5MB for metadata
+    
+    // Additional memory for processing overhead
+    const processingBuffer = Math.min(
+      totalSize * 0.2, // 20% of file size
+      50 * 1024 * 1024 // Max 50MB buffer
+    );
+
+    // Calculate total estimated memory
+    const estimatedMemory = baseMemory + pageMemory + metadataMemory + processingBuffer;
+
+    // Add safety margin for very large files
+    const safetyMargin = totalSize > 50 * 1024 * 1024 ? 1.2 : 1.1;
+    
+    return Math.ceil(estimatedMemory * safetyMargin);
+  } catch {
+    // Fallback estimation if analysis fails
+    return Math.ceil(buffer.length * 2.5);
+  }
+};
 
 /**
  * Estimates the quality/integrity of a PDF file
@@ -164,7 +240,7 @@ export function isPDFCorrupted(data: Uint8Array): boolean {
  */
 export function getPDFQualityScore(data: Uint8Array): number {
   try {
-    const content = String.fromCharCode(...data);
+    const content = new TextDecoder().decode(data);
     let score = 1.0;
 
     // Check header quality

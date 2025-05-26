@@ -1,12 +1,12 @@
 import { PDFDocument, PDFPage, PDFName, PDFDict } from 'pdf-lib';
 import { createHash } from 'crypto';
+import { estimatePDFMemoryUsage } from '@/lib/utils/pdf-validation';
 
-// Advanced optimization constants
-const THREAD_POOL_SIZE = Math.max(2, Math.min(navigator?.hardwareConcurrency || 4, 8));
-const PAGE_BATCH_SIZE = 25; // Reduced batch size for better memory management
-const COMPRESSION_LEVEL = 0.92; // Optimal compression ratio
-const MAX_CONCURRENT_LOADS = 3; // Reduced for better stability
-const CLEANUP_INTERVAL = 50; // Clean up after every 50 operations
+// Constants for optimization
+const MAX_CONCURRENT_LOADS = 3;
+const PAGE_BATCH_SIZE = 10;
+const CLEANUP_INTERVAL = 50;
+const MEMORY_LIMIT = 1024 * 1024 * 1024; // 1GB
 
 // Cache for PDF validation and metadata
 const validationCache = new WeakMap<ArrayBuffer, boolean>();
@@ -24,18 +24,22 @@ interface ProcessingOptions {
   optimizeImages?: boolean;
   removeMetadata?: boolean;
   maxQuality?: number;
+  maxConcurrentLoads?: number;
+  pageBatchSize?: number;
 }
 
 export class PDFService {
   private static instance: PDFService;
   private processingPool: Set<Promise<any>>;
   private loadingPromises: Map<string, Promise<PDFDocument>>;
-  private operationCount: number = 0;
+  private operationCount: number;
+  private totalMemoryUsage: number;
 
   private constructor() {
     this.processingPool = new Set();
     this.loadingPromises = new Map();
     this.operationCount = 0;
+    this.totalMemoryUsage = 0;
   }
 
   static getInstance(): PDFService {
@@ -137,6 +141,12 @@ export class PDFService {
       
       const loadPromises: Promise<PDFDocument>[] = [];
       const fileHashes = new Map<string, number>();
+
+      // Estimate memory usage
+      for (const buffer of buffers) {
+        const memoryEstimate = await estimatePDFMemoryUsage(new Uint8Array(buffer));
+        await this.checkMemoryLimit(memoryEstimate);
+      }
 
       // Load PDFs in parallel with rate limiting
       for (let i = 0; i < buffers.length; i += MAX_CONCURRENT_LOADS) {
@@ -256,6 +266,15 @@ export class PDFService {
     } catch {
       return false;
     }
+  }
+
+  private async checkMemoryLimit(newUsage: number) {
+    if (this.totalMemoryUsage + newUsage > MEMORY_LIMIT) {
+      this.cleanup();
+      this.totalMemoryUsage = 0;
+      throw new Error('Memory limit exceeded');
+    }
+    this.totalMemoryUsage += newUsage;
   }
 
   /**
