@@ -9,7 +9,7 @@
   "regions": ["iad1"],
   "functions": {
     "api/merge": {
-      "maxDuration": 60
+      "maxDuration": 59
     }
   },
   "headers": [
