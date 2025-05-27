@@ -23,10 +23,6 @@ const nextConfig = {
       bodySizeLimit: '200mb',
     },
   },
-  serverRuntimeConfig: {
-    // Will only be available on the server side
-    maxDuration: 60, // Maximum allowed duration for Vercel hobby plan
-  },
   publicRuntimeConfig: {
     // Will be available on both server and client
     maxUploadSize: '200mb',

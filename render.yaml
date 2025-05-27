@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: pdfmerger
+    env: node
+    buildCommand: npm cache clean --force && rm -rf node_modules && npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_APP_URL
+        value: https://pdfmerger.onrender.com
+    autoDeploy: true
+    plan: starter
+    healthCheckPath: /api/healthcheck 
