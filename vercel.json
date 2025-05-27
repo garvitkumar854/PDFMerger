@@ -8,8 +8,8 @@
   ],
   "regions": ["iad1"],
   "functions": {
-    "api/merge": {
-      "maxDuration": 59
+    "app/api/merge/route": {
+      "maxDuration": 58
     }
   },
   "headers": [

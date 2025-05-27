@@ -20,7 +20,7 @@ const SMALL_FILE_PARSE_SPEED = 6000; // Increased from 5000
 
 // Route configuration
 export const runtime = 'nodejs';
-export const preferredRegion = ['fra1'];
+export const preferredRegion = ['iad1'];
 export const maxDuration = 59;
 export const dynamic = 'force-dynamic';
 
