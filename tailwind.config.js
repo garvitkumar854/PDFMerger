@@ -16,6 +16,11 @@ module.exports = {
       },
     },
     extend: {
+      fontFamily: {
+        opensans: ['Open Sans', 'sans-serif'],
+        poppins: ['Poppins', 'sans-serif'],
+        rubik: ['Rubik', 'sans-serif'],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
