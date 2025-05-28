@@ -1,16 +1,19 @@
 import { PDFDocument, PDFPage, PDFName, PDFDict } from 'pdf-lib';
 import { createHash } from 'crypto';
 import { estimatePDFMemoryUsage } from '@/lib/utils/pdf-validation';
+import pLimit from 'p-limit';
 
-// Constants for optimization
-const MAX_CONCURRENT_LOADS = 3;
-const PAGE_BATCH_SIZE = 10;
-const CLEANUP_INTERVAL = 50;
+// Optimized constants for better performance
+const MAX_CONCURRENT_LOADS = 4; // Increased from 3
+const PAGE_BATCH_SIZE = 20; // Increased from 10
+const CLEANUP_INTERVAL = 100; // Increased from 50
 const MEMORY_LIMIT = 1024 * 1024 * 1024; // 1GB
+const MAX_PARALLEL_OPERATIONS = 8;
 
 // Cache for PDF validation and metadata
 const validationCache = new WeakMap<ArrayBuffer, boolean>();
 const metadataCache = new WeakMap<ArrayBuffer, PDFMetadata>();
+const pageCache = new WeakMap<PDFDocument, PDFPage[]>();
 
 interface PDFMetadata {
   pageCount: number;
@@ -22,24 +25,20 @@ interface PDFMetadata {
 
 interface ProcessingOptions {
   optimizeImages?: boolean;
-  removeMetadata?: boolean;
-  maxQuality?: number;
-  maxConcurrentLoads?: number;
-  pageBatchSize?: number;
+  updateMetadata?: boolean;
+  useObjectStreams?: boolean;
 }
 
 export class PDFService {
   private static instance: PDFService;
-  private processingPool: Set<Promise<any>>;
   private loadingPromises: Map<string, Promise<PDFDocument>>;
   private operationCount: number;
-  private totalMemoryUsage: number;
+  private limit: ReturnType<typeof pLimit>;
 
   private constructor() {
-    this.processingPool = new Set();
     this.loadingPromises = new Map();
     this.operationCount = 0;
-    this.totalMemoryUsage = 0;
+    this.limit = pLimit(MAX_PARALLEL_OPERATIONS);
   }
 
   static getInstance(): PDFService {
@@ -47,6 +46,165 @@ export class PDFService {
       PDFService.instance = new PDFService();
     }
     return PDFService.instance;
+  }
+
+  private async checkMemoryLimit(additionalMemory: number): Promise<void> {
+    if (process.memoryUsage().heapUsed + additionalMemory > MEMORY_LIMIT) {
+      this.cleanup();
+      if (process.memoryUsage().heapUsed + additionalMemory > MEMORY_LIMIT) {
+        throw new Error('Memory limit exceeded');
+      }
+    }
+  }
+
+  private cleanup(): void {
+    this.loadingPromises.clear();
+    global.gc?.();
+  }
+
+  private async optimizePage(page: PDFPage): Promise<void> {
+    try {
+      const pageDict = page.node;
+      const resources = pageDict.get(PDFName.of('Resources')) as PDFDict;
+      
+      if (!resources) return;
+
+      // Optimize XObjects (images)
+      const xObjects = resources.get(PDFName.of('XObject')) as PDFDict;
+      if (xObjects) {
+        const entries = xObjects.entries();
+        for (const [_, xObject] of entries) {
+          const dict = xObject as PDFDict;
+          if (dict.get(PDFName.of('Subtype')) === PDFName.of('Image')) {
+            dict.set(PDFName.of('Interpolate'), PDFName.of('true'));
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Error optimizing page:', error);
+    }
+  }
+
+  /**
+   * Process PDFs in parallel with advanced optimizations
+   */
+  async processPDFs(
+    buffers: ArrayBuffer[],
+    options: ProcessingOptions = {}
+  ): Promise<Uint8Array> {
+    if (!buffers.length) {
+      throw new Error('No PDF buffers provided');
+    }
+
+    try {
+      const mergedPdf = await PDFDocument.create({ 
+        updateMetadata: false 
+      });
+      
+      // Pre-allocate arrays for better memory management
+      const loadPromises: Promise<PDFDocument>[] = new Array(buffers.length);
+      const fileHashes = new Map<string, number>();
+      const processedDocs: PDFDocument[] = new Array(buffers.length);
+
+      // Estimate total memory usage upfront
+      const totalMemoryEstimate = await Promise.all(
+        buffers.map(buffer => estimatePDFMemoryUsage(new Uint8Array(buffer)))
+      ).then(estimates => estimates.reduce((a, b) => a + b, 0));
+
+      await this.checkMemoryLimit(totalMemoryEstimate);
+
+      // Load PDFs in parallel with optimized batching
+      const loadBatches = Math.ceil(buffers.length / MAX_CONCURRENT_LOADS);
+      for (let i = 0; i < loadBatches; i++) {
+        const startIdx = i * MAX_CONCURRENT_LOADS;
+        const endIdx = Math.min((i + 1) * MAX_CONCURRENT_LOADS, buffers.length);
+        const batch = buffers.slice(startIdx, endIdx);
+
+        const batchPromises = batch.map(async (buffer, batchIndex) => {
+          const hash = createHash('sha256')
+            .update(new Uint8Array(buffer))
+            .digest('hex');
+          
+          if (this.loadingPromises.has(hash)) {
+            return this.loadingPromises.get(hash)!;
+          }
+
+          const loadPromise = this.limit(() => PDFDocument.load(buffer, {
+            updateMetadata: false,
+            ignoreEncryption: true,
+            throwOnInvalidObject: true,
+            parseSpeed: 2000, // Increased parse speed
+            capNumbers: true
+          }));
+
+          this.loadingPromises.set(hash, loadPromise);
+          fileHashes.set(hash, (fileHashes.get(hash) || 0) + 1);
+          
+          const doc = await loadPromise;
+          processedDocs[startIdx + batchIndex] = doc;
+          return doc;
+        });
+
+        await Promise.all(batchPromises);
+      }
+
+      // Process pages with optimized batching and caching
+      const pagePromises: Promise<void>[] = [];
+      
+      for (const doc of processedDocs) {
+        if (!doc) continue;
+
+        const pageCount = doc.getPageCount();
+        const pageBatches = Math.ceil(pageCount / PAGE_BATCH_SIZE);
+
+        for (let i = 0; i < pageBatches; i++) {
+          const startPage = i * PAGE_BATCH_SIZE;
+          const endPage = Math.min((i + 1) * PAGE_BATCH_SIZE, pageCount);
+          const pageIndices = Array.from(
+            { length: endPage - startPage },
+            (_, idx) => startPage + idx
+          );
+
+          pagePromises.push(
+            this.limit(async () => {
+              const pages = await mergedPdf.copyPages(doc, pageIndices);
+              
+              if (options.optimizeImages) {
+                await Promise.all(pages.map(page => this.optimizePage(page)));
+              }
+              
+              pages.forEach(page => mergedPdf.addPage(page));
+
+              // Periodic cleanup
+              this.operationCount++;
+              if (this.operationCount % CLEANUP_INTERVAL === 0) {
+                this.cleanup();
+              }
+            })
+          );
+        }
+      }
+
+      await Promise.all(pagePromises);
+
+      // Final cleanup
+      this.cleanup();
+
+      // Optimize output with enhanced settings
+      const mergedPdfBytes = await mergedPdf.save({
+        useObjectStreams: options.useObjectStreams ?? true,
+        addDefaultPage: false,
+        objectsPerTick: 500, // Increased from 200
+        updateFieldAppearances: false,
+        useStreamedObjects: true
+      });
+
+      return mergedPdfBytes;
+    } catch (error) {
+      console.error('PDF processing error:', error);
+      this.cleanup();
+      throw error;
+    }
   }
 
   /**
@@ -124,134 +282,6 @@ export class PDFService {
   }
 
   /**
-   * Process PDFs in parallel with advanced optimizations
-   */
-  async processPDFs(
-    buffers: ArrayBuffer[],
-    options: ProcessingOptions = {}
-  ): Promise<Uint8Array> {
-    if (!buffers.length) {
-      throw new Error('No PDF buffers provided');
-    }
-
-    try {
-      const mergedPdf = await PDFDocument.create({ 
-        updateMetadata: false 
-      });
-      
-      const loadPromises: Promise<PDFDocument>[] = [];
-      const fileHashes = new Map<string, number>();
-
-      // Estimate memory usage
-      for (const buffer of buffers) {
-        const memoryEstimate = await estimatePDFMemoryUsage(new Uint8Array(buffer));
-        await this.checkMemoryLimit(memoryEstimate);
-      }
-
-      // Load PDFs in parallel with rate limiting
-      for (let i = 0; i < buffers.length; i += MAX_CONCURRENT_LOADS) {
-        const batch = buffers.slice(i, i + MAX_CONCURRENT_LOADS);
-        const batchPromises = batch.map(async (buffer) => {
-          const hash = createHash('sha256')
-            .update(new Uint8Array(buffer))
-            .digest('hex');
-          
-          // Reuse already loaded PDFs
-          if (this.loadingPromises.has(hash)) {
-            return this.loadingPromises.get(hash)!;
-          }
-
-          const loadPromise = PDFDocument.load(buffer, {
-            updateMetadata: false,
-            ignoreEncryption: true,
-            throwOnInvalidObject: true,
-            parseSpeed: 1000,
-            capNumbers: true
-          });
-
-          this.loadingPromises.set(hash, loadPromise);
-          fileHashes.set(hash, (fileHashes.get(hash) || 0) + 1);
-
-          return loadPromise;
-        });
-
-        loadPromises.push(...batchPromises);
-        await Promise.all(batchPromises); // Rate limit loading
-      }
-
-      // Process all PDFs
-      const docs = await Promise.all(loadPromises);
-
-      // Process pages in optimized batches
-      for (const doc of docs) {
-        const pageCount = doc.getPageCount();
-        const pageBatches = Math.ceil(pageCount / PAGE_BATCH_SIZE);
-
-        for (let i = 0; i < pageBatches; i++) {
-          const startPage = i * PAGE_BATCH_SIZE;
-          const endPage = Math.min((i + 1) * PAGE_BATCH_SIZE, pageCount);
-          const pageIndices = Array.from(
-            { length: endPage - startPage },
-            (_, idx) => startPage + idx
-          );
-
-          // Copy pages in parallel
-          const pages = await mergedPdf.copyPages(doc, pageIndices);
-          pages.forEach(page => {
-            if (options.optimizeImages) {
-              this.optimizePage(page);
-            }
-            mergedPdf.addPage(page);
-          });
-
-          // Periodic cleanup
-          this.operationCount++;
-          if (this.operationCount % CLEANUP_INTERVAL === 0) {
-            this.cleanup();
-          }
-        }
-      }
-
-      // Final cleanup
-      this.cleanup();
-
-      // Optimize output
-      const mergedPdfBytes = await mergedPdf.save({
-        useObjectStreams: true,
-        addDefaultPage: false,
-        objectsPerTick: 200,
-        updateFieldAppearances: false
-      });
-
-      return mergedPdfBytes;
-    } catch (error) {
-      console.error('PDF processing error:', error);
-      this.cleanup(); // Ensure cleanup on error
-      throw error;
-    }
-  }
-
-  /**
-   * Optimize individual PDF page
-   */
-  private optimizePage(page: PDFPage): void {
-    try {
-      // Remove unnecessary metadata
-      const names = ['PieceInfo', 'Metadata', 'Thumb'].map(name => 
-        PDFName.of(name)
-      );
-      
-      for (const name of names) {
-        if (page.node.has(name)) {
-          page.node.delete(name);
-        }
-      }
-    } catch (error) {
-      console.warn('Page optimization warning:', error);
-    }
-  }
-
-  /**
    * Check for XFA forms (which can cause issues)
    */
   private checkForXFA(doc: PDFDocument): boolean {
@@ -265,41 +295,6 @@ export class PDFService {
       return acroForm.has(PDFName.of('XFA'));
     } catch {
       return false;
-    }
-  }
-
-  private async checkMemoryLimit(newUsage: number) {
-    if (this.totalMemoryUsage + newUsage > MEMORY_LIMIT) {
-      this.cleanup();
-      this.totalMemoryUsage = 0;
-      throw new Error('Memory limit exceeded');
-    }
-    this.totalMemoryUsage += newUsage;
-  }
-
-  /**
-   * Clean up resources
-   */
-  cleanup(): void {
-    try {
-      // Clear caches if they're too large
-      if (this.loadingPromises.size > 100) {
-        this.loadingPromises.clear();
-      }
-
-      this.processingPool.clear();
-      
-      // Reset operation count periodically
-      if (this.operationCount > 1000) {
-        this.operationCount = 0;
-      }
-
-      // Force garbage collection if available
-      if (global.gc) {
-        global.gc();
-      }
-    } catch (error) {
-      console.warn('Cleanup warning:', error);
     }
   }
 } 
