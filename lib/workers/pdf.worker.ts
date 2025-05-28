@@ -39,13 +39,14 @@ const checkMemoryUsage = () => {
 
 // Optimized cleanup function
 const cleanup = () => {
-  pdfService.cleanup();
+  pdfService.cleanupResources();
   if (global.gc) {
     try {
       global.gc();
-    } catch (e) {}
+    } catch (error) {
+      console.warn('Failed to run garbage collection:', error);
+    }
   }
-  currentMemoryUsage = 0;
 };
 
 // Enhanced progress tracking

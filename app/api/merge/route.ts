@@ -83,16 +83,16 @@ export async function POST(request: NextRequest) {
           const buffer = await file.arrayBuffer();
           
           // Run validations in parallel
-          const [validationResult, corruptionCheck] = await Promise.all([
+          const [isValid, isCorrupted] = await Promise.all([
             validatePDF(new Uint8Array(buffer)),
             isPDFCorrupted(new Uint8Array(buffer))
           ]);
 
-          if (!validationResult.isValid) {
+          if (!isValid) {
             throw new Error(`File ${index + 1} is not a valid PDF`);
           }
 
-          if (corruptionCheck) {
+          if (isCorrupted) {
             throw new Error(`File ${index + 1} appears to be corrupted`);
           }
 

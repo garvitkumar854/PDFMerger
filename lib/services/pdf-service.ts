@@ -62,6 +62,13 @@ export class PDFService {
     global.gc?.();
   }
 
+  /**
+   * Public method to trigger cleanup
+   */
+  public cleanupResources(): void {
+    this.cleanup();
+  }
+
   private async optimizePage(page: PDFPage): Promise<void> {
     try {
       const pageDict = page.node;
@@ -195,8 +202,7 @@ export class PDFService {
         useObjectStreams: options.useObjectStreams ?? true,
         addDefaultPage: false,
         objectsPerTick: 500, // Increased from 200
-        updateFieldAppearances: false,
-        useStreamedObjects: true
+        updateFieldAppearances: false
       });
 
       return mergedPdfBytes;
