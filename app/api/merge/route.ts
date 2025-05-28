@@ -13,10 +13,10 @@ const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
 const SMALL_FILE_THRESHOLD = 20 * 1024 * 1024;
 
-// Configure runtime
+// Configure runtime with Vercel Hobby plan limits
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300;
+export const maxDuration = 60; // Updated to 60 seconds for Vercel Hobby plan
 
 // Validate file size
 function validateFileSize(size: number, index: number): void {
@@ -31,10 +31,10 @@ export async function POST(request: NextRequest) {
   const { signal } = controller;
   let retryCount = 0;
 
-  // Set timeout for the entire operation
+  // Set timeout for the entire operation (55 seconds to allow for cleanup)
   const timeout = setTimeout(() => {
     controller.abort();
-  }, 280000); // 280 seconds to ensure we stay within the 300-second limit
+  }, 55000);
 
   try {
     console.log('[PDF Merge] Starting new merge request');
@@ -43,6 +43,15 @@ export async function POST(request: NextRequest) {
     const deviceType = request.headers.get('X-Device-Type') || 'desktop';
     const totalSize = parseInt(request.headers.get('X-Total-Size') || '0');
     retryCount = parseInt(request.headers.get('X-Retry-Count') || '0');
+
+    // Add size-based validation for faster rejection
+    const estimatedProcessingTime = (totalSize / (1024 * 1024)) * 0.5; // Rough estimate: 0.5s per MB
+    if (estimatedProcessingTime > 55) {
+      return NextResponse.json(
+        { error: 'Files too large for processing. Please reduce the total size or use fewer files.' },
+        { status: 413 }
+      );
+    }
 
     console.log(`[PDF Merge] Request details: Device=${deviceType}, Files=${files.length}, TotalSize=${totalSize}bytes`);
 
@@ -104,10 +113,10 @@ export async function POST(request: NextRequest) {
     // Get PDF service instance
     const pdfService = PDFService.getInstance();
 
-    // Process PDFs with optimized settings
+    // Process PDFs with optimized settings for faster processing
     const mergedPdfBytes = await pdfService.processPDFs(buffers, {
-      optimizeImages: true,
-      useObjectStreams: totalSize > SMALL_FILE_THRESHOLD
+      optimizeImages: false, // Disable image optimization for faster processing
+      useObjectStreams: false // Disable object streams for faster processing
     });
 
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
