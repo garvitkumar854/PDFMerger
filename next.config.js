@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   images: {
-    domains: ['localhost'],
+    domains: ['localhost', 'vercel.app', 'vercel.com'],
     formats: ['image/avif', 'image/webp'],
   },
   poweredByHeader: false,
@@ -59,7 +59,9 @@ const nextConfig = {
     }
 
     // Add necessary externals
-    config.externals = [...(config.externals || []), 'canvas', 'jsdom'];
+    if (isServer) {
+      config.externals = [...(config.externals || []), 'canvas', 'jsdom'];
+    }
 
     // Optimize for large file uploads
     if (isServer) {
@@ -71,6 +73,14 @@ const nextConfig = {
 
     return config;
   },
+  typescript: {
+    ignoreBuildErrors: false,
+  },
+  eslint: {
+    ignoreDuringBuilds: false,
+  },
+  // Vercel-specific optimizations
+  output: 'standalone',
 };
 
 module.exports = nextConfig;
