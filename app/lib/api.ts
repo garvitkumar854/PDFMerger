@@ -1,3 +1,12 @@
+// Add type definition for Chrome's Performance interface
+interface ExtendedPerformance extends Performance {
+  memory?: {
+    jsHeapSizeLimit: number;
+    totalJSHeapSize: number;
+    usedJSHeapSize: number;
+  };
+}
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export async function mergePDFs(files: File[]) {
@@ -7,12 +16,16 @@ export async function mergePDFs(files: File[]) {
       formData.append('files', file);
     });
 
+    // Safely access performance.memory
+    const performance = window.performance as ExtendedPerformance;
+    const memoryLimit = performance?.memory?.jsHeapSizeLimit;
+
     const response = await fetch(`${API_URL}/api/merge`, {
       method: 'POST',
       body: formData,
       headers: {
         'X-Device-Type': 'web',
-        'X-Client-Memory': String(window.performance?.memory?.jsHeapSizeLimit || 0),
+        'X-Client-Memory': String(memoryLimit || 0),
         'X-Total-Size': String(files.reduce((acc, file) => acc + file.size, 0)),
       },
     });
