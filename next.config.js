@@ -1,15 +1,13 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'standalone',
-  outputFileTracing: true,
   images: {
     unoptimized: true
   },
   poweredByHeader: false,
   reactStrictMode: true,
   swcMinify: true,
-  experimental: {
-    forceSwcTransforms: true
+  env: {
+    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
   }
 }
 

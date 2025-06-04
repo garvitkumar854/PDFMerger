@@ -1,10 +1,12 @@
 {
   "version": 2,
   "buildCommand": "npm run build",
-  "outputDirectory": ".next",
-  "regions": ["sfo1"],
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "framework": "nextjs",
+  "regions": ["fra1"],
   "env": {
-    "NEXT_PUBLIC_API_URL": "@api_url"
+    "NEXT_TELEMETRY_DISABLED": "1"
   },
   "headers": [
     {
