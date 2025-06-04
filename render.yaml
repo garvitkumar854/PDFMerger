@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: pdfmerger-api
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+    autoDeploy: true
+    healthCheckPath: /api/healthcheck
+    scaling:
+      minInstances: 1
+      maxInstances: 3
+      targetMemoryPercent: 80
+    disk:
+      name: tmp
+      mountPath: /tmp
+      sizeGB: 1 

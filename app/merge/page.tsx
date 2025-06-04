@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { clearProcessedFiles } from "@/lib/utils/file-validation";
+import { validatePDF } from "@/lib/utils/pdf-validation";
 import {
   DndContext,
   closestCenter,
@@ -286,17 +287,22 @@ SortableFileItem.displayName = 'SortableFileItem';
 // Optimized file processing function
 const processFiles = async (files: FileItem[]): Promise<FormData> => {
   const formData = new FormData();
-  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-
-  // Process files in parallel batches
-  const batchSize = Math.min(PARALLEL_UPLOADS, files.length);
-  for (let i = 0; i < files.length; i += batchSize) {
-    const batch = files.slice(i, i + batchSize);
-    await Promise.all(batch.map(async (fileItem) => {
-      formData.append("files", fileItem.file);
-    }));
+  
+  for (const file of files) {
+    try {
+      const arrayBuffer = await file.file.arrayBuffer();
+      const validationResult = await validatePDF(new Uint8Array(arrayBuffer));
+      
+      if (!validationResult.isValid) {
+        throw new Error(`${file.name} is not a valid PDF: ${validationResult.error}`);
+      }
+      
+      formData.append('files', file.file);
+    } catch (error) {
+      throw new Error(`Error processing ${file.name}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
-
+  
   return formData;
 };
 

@@ -93,101 +93,50 @@ export function clearValidationCache(): void {
  * PDF validation utilities
  */
 
+interface ValidationResult {
+  isValid: boolean;
+  error?: string;
+}
+
 /**
  * Validates a PDF file structure
  * @param data PDF file data as Uint8Array
  * @returns Promise that resolves if PDF is valid, rejects if invalid
  */
-export const validatePDF = async (buffer: Uint8Array): Promise<boolean> => {
+export async function validatePDF(pdfBytes: Uint8Array): Promise<ValidationResult> {
   try {
-    // Minimal size check
-    if (buffer.length < 32) return false;
-    
-    // Fast header check using DataView for better performance
-    const view = new DataView(buffer.buffer);
-    if (!(view.getUint8(0) === 0x25 && // %
-          view.getUint8(1) === 0x50 && // P
-          view.getUint8(2) === 0x44 && // D
-          view.getUint8(3) === 0x46 && // F
-          view.getUint8(4) === 0x2D))  // -
-    {
-      return false;
-    }
-
-    // Quick EOF check in last 1024 bytes for faster validation
-    const tail = buffer.slice(-Math.min(1024, buffer.length));
-    if (!new TextDecoder().decode(tail).includes('%%EOF')) {
-      return false;
-    }
-
-    // Optimized PDF loading with dynamic parse speed
-    const pdfDoc = await PDFDocument.load(buffer, {
-      ignoreEncryption: true,
+    const pdfDoc = await PDFDocument.load(pdfBytes, { 
       updateMetadata: false,
-      throwOnInvalidObject: false,
-      parseSpeed: buffer.length < 20 * 1024 * 1024 ? 6000 : 3000
+      ignoreEncryption: true 
     });
-
-    // Quick structure validation
-    if (pdfDoc.getPageCount() === 0) return false;
-
-    // Only check first page metadata for speed
-    const firstPage = pdfDoc.getPage(0);
-    const { width, height } = firstPage.getSize();
     
-    return width > 0 && height > 0;
-  } catch {
-    return false;
+    if (!pdfDoc || pdfDoc.getPageCount() === 0) {
+      return { isValid: false, error: 'Invalid PDF document or no pages found' };
+    }
+
+    return { isValid: true };
+  } catch (error) {
+    return { 
+      isValid: false, 
+      error: error instanceof Error ? error.message : 'Failed to validate PDF'
+    };
   }
-};
+}
 
 /**
  * Checks if a PDF file appears to be corrupted
  */
-export const isPDFCorrupted = async (buffer: Uint8Array): Promise<boolean> => {
+export async function isPDFCorrupted(pdfBytes: Uint8Array): Promise<boolean> {
   try {
-    // Quick size validation
-    if (buffer.length < 32) return true;
-
-    // Fast header check using DataView
-    const view = new DataView(buffer.buffer);
-    const headerValid = view.getUint8(0) === 0x25 && // %
-                       view.getUint8(1) === 0x50 && // P
-                       view.getUint8(2) === 0x44 && // D
-                       view.getUint8(3) === 0x46 && // F
-                       view.getUint8(4) === 0x2D;   // -
-    
-    if (!headerValid) return true;
-
-    // Quick EOF check
-    const tail = buffer.slice(-Math.min(1024, buffer.length));
-    if (!new TextDecoder().decode(tail).includes('%%EOF')) return true;
-
-    // Load PDF with optimized settings
-    const pdfDoc = await PDFDocument.load(buffer, {
-      ignoreEncryption: true,
+    const pdfDoc = await PDFDocument.load(pdfBytes, {
       updateMetadata: false,
-      throwOnInvalidObject: false,
-      parseSpeed: buffer.length < 20 * 1024 * 1024 ? 6000 : 3000
+      ignoreEncryption: true
     });
-
-    // Basic structure check
-    if (pdfDoc.getPageCount() === 0) return true;
-
-    // Only check first and last page for speed
-    const pages = pdfDoc.getPages();
-    const checkPages = [pages[0], pages[pages.length - 1]];
-
-    for (const page of checkPages) {
-      const { width, height } = page.getSize();
-      if (!width || !height || width <= 0 || height <= 0) return true;
-    }
-
-    return false;
-  } catch {
+    return !pdfDoc || pdfDoc.getPageCount() === 0;
+  } catch (error) {
     return true;
   }
-};
+}
 
 /**
  * Estimates the memory usage for processing a PDF with enhanced accuracy

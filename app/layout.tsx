@@ -63,17 +63,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <head>
-        <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-      </head>
-      <body className={inter.className} suppressHydrationWarning>
+      <body className={`${inter.className} min-h-screen bg-background antialiased`}>
         <ClerkProvider>
           <ErrorBoundary>
             <ThemeProvider>
               <div className="relative min-h-screen flex flex-col">
                 <Navbar />
-                <main className="flex-1">
+                <main className="flex-1 w-full">
                   {children}
                 </main>
                 <Footer />

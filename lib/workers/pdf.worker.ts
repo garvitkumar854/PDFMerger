@@ -3,11 +3,12 @@
 import { PDFService } from '../services/pdf-service';
 
 // Optimized constants for worker
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks for streaming
-const MAX_PROCESSING_TIME = 180000; // 3 minutes
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB chunks for streaming
+const MAX_PROCESSING_TIME = 300000; // 5 minutes
 const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
-const MEMORY_LIMIT = 1024 * 1024 * 1024; // 1GB worker memory limit
-const CLEANUP_INTERVAL = 30000; // 30 seconds
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024; // 100MB
+const MEMORY_LIMIT = 2048 * 1024 * 1024; // 2GB worker memory limit
+const CLEANUP_INTERVAL = 60000; // 60 seconds
 
 // Initialize PDF service with enhanced settings
 const pdfService = PDFService.getInstance();
@@ -39,7 +40,7 @@ const checkMemoryUsage = () => {
 
 // Optimized cleanup function
 const cleanup = () => {
-  pdfService.cleanupResources();
+  pdfService.cleanup(true);
   if (global.gc) {
     try {
       global.gc();
@@ -51,9 +52,15 @@ const cleanup = () => {
 
 // Enhanced progress tracking
 interface ProgressUpdate {
-  phase: 'validation' | 'loading' | 'merging' | 'saving';
+  phase: 'initialization' | 'validation' | 'loading' | 'merging' | 'optimizing' | 'finalizing';
   progress: number;
   totalProgress: number;
+  details?: {
+    pagesProcessed: number;
+    totalPages: number;
+    currentStage: number;
+    totalStages: number;
+  };
 }
 
 // Handle messages from main thread with enhanced error handling and progress tracking
@@ -81,33 +88,46 @@ self.onmessage = async (e: MessageEvent) => {
         const { buffers, options } = data;
         const totalSize = buffers.reduce((sum: number, buf: ArrayBuffer) => sum + buf.byteLength, 0);
         
-        // Optimize processing based on total size
-        const isLargeOperation = totalSize > SMALL_FILE_THRESHOLD * buffers.length;
+        // Optimize processing based on file size
+        const isSmallOperation = totalSize < SMALL_FILE_THRESHOLD;
+        const isLargeOperation = totalSize > LARGE_FILE_THRESHOLD;
+        
         const processOptions = {
           ...options,
-          parseSpeed: isLargeOperation ? 1500 : 4000,
-          useObjectStreams: isLargeOperation,
-          objectsPerTick: isLargeOperation ? 500 : 1000,
-          onProgress: (phase: 'validation' | 'loading' | 'merging' | 'saving', progress: number, totalProgress: number) => {
-            sendProgress({ phase, progress, totalProgress });
+          parseSpeed: isSmallOperation ? 250000 : isLargeOperation ? 100000 : 500000,
+          maxConcurrentOperations: isSmallOperation ? 512 : isLargeOperation ? 64 : 256,
+          chunkSize: isSmallOperation ? 64 : isLargeOperation ? 512 : 256,
+          onProgress: (
+            stage: ProgressUpdate['phase'],
+            progress: number,
+            totalProgress: number,
+            details?: ProgressUpdate['details']
+          ) => {
+            sendProgress({ 
+              phase: stage, 
+              progress, 
+              totalProgress,
+              details
+            });
           }
         };
 
-        // Process in chunks with memory management
-        let processedPdf;
+        // Process immediately without delays
         try {
           checkMemoryUsage();
-          processedPdf = await pdfService.processPDFs(buffers, processOptions);
+          const result = await pdfService.processPDFs(buffers, processOptions);
           
-          // Monitor processing time
-          if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-            throw new Error('Processing timeout exceeded');
+          if (!result.success || !result.data) {
+            throw new Error(result.error || 'Failed to process PDFs');
           }
 
-          const transferList: Transferable[] = [processedPdf.buffer];
+          const transferList: Transferable[] = [result.data.buffer];
           self.postMessage({ 
             id, 
-            result: processedPdf,
+            result: {
+              data: result.data,
+              stats: result.stats
+            },
             processingTime: (Date.now() - startTime) / 1000
           }, transferList);
         } finally {
@@ -126,7 +146,7 @@ self.onmessage = async (e: MessageEvent) => {
         throw new Error(`Unknown message type: ${type}`);
     }
   } catch (error) {
-    cleanup(); // Clean up on error
+    cleanup();
     self.postMessage({
       id,
       error: error instanceof Error ? error.message : 'Unknown error'
@@ -170,4 +190,4 @@ if (self.crossOriginIsolated) {
 // Periodic cleanup to prevent memory leaks
 setInterval(() => {
   checkMemoryUsage();
-}, 30000); // Check every 30 seconds 
+}, 60000); // Check every 60 seconds 

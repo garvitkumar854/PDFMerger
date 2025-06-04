@@ -1,166 +1,195 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { PDFDocument } from 'pdf-lib';
-import { Readable } from 'stream';
-import { validatePDF, isPDFCorrupted } from '@/lib/utils/pdf-validation';
 import { PDFService } from '@/lib/services/pdf-service';
-import pLimit from 'p-limit';
+import { Readable } from 'stream';
 
-// Optimized server-side constants
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 1000;
-const MAX_CONCURRENT_OPERATIONS = 8;
-const MAX_FILE_SIZE = 200 * 1024 * 1024; // 200MB
-const MAX_TOTAL_SIZE = 200 * 1024 * 1024; // 200MB total
-const SMALL_FILE_THRESHOLD = 20 * 1024 * 1024;
-
-// Configure runtime with Vercel Hobby plan limits
+// Configure for maximum performance
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // Updated to 60 seconds for Vercel Hobby plan
+export const maxDuration = 600; // Increased to 10 minutes for large merges
 
-// Validate file size
-function validateFileSize(size: number, index: number): void {
-  if (size > MAX_FILE_SIZE) {
-    throw new Error(`File ${index + 1} exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`);
-  }
-}
+// Advanced performance metrics
+const metrics = {
+  startTime: 0,
+  bytesProcessed: 0,
+  filesProcessed: 0,
+  peakMemory: 0
+};
 
 export async function POST(request: NextRequest) {
-  const startTime = Date.now();
-  const controller = new AbortController();
-  const { signal } = controller;
-  let retryCount = 0;
-
-  // Set timeout for the entire operation (55 seconds to allow for cleanup)
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 55000);
-
   try {
-    console.log('[PDF Merge] Starting new merge request');
+    metrics.startTime = performance.now();
+    console.log('[PDF Merge] Starting new merge request with ultra-performance settings');
+    
     const formData = await request.formData();
     const files = formData.getAll('files');
-    const deviceType = request.headers.get('X-Device-Type') || 'desktop';
-    const totalSize = parseInt(request.headers.get('X-Total-Size') || '0');
-    retryCount = parseInt(request.headers.get('X-Retry-Count') || '0');
-
-    // Add size-based validation for faster rejection
-    const estimatedProcessingTime = (totalSize / (1024 * 1024)) * 0.5; // Rough estimate: 0.5s per MB
-    if (estimatedProcessingTime > 55) {
-      return NextResponse.json(
-        { error: 'Files too large for processing. Please reduce the total size or use fewer files.' },
-        { status: 413 }
-      );
-    }
-
-    console.log(`[PDF Merge] Request details: Device=${deviceType}, Files=${files.length}, TotalSize=${totalSize}bytes`);
-
-    // Validate request
-    if (!files.length) {
-      return NextResponse.json(
-        { error: 'No files provided' },
-        { status: 400 }
-      );
-    }
-
-    if (files.length < 2) {
-      return NextResponse.json(
-        { error: 'At least 2 PDF files are required' },
-        { status: 400 }
-      );
-    }
-
-    if (totalSize > MAX_TOTAL_SIZE) {
-      return NextResponse.json(
-        { error: 'Total file size exceeds 200MB limit' },
-        { status: 400 }
-      );
-    }
-
-    // Process files in parallel with optimized validation
-    const limit = pLimit(MAX_CONCURRENT_OPERATIONS);
-    const buffers: ArrayBuffer[] = [];
     
-    await Promise.all(
-      files.map((file, index) => 
-        limit(async () => {
-          if (!(file instanceof Blob)) {
-            throw new Error('Invalid file format');
-          }
+    // Enhanced request metadata
+    const deviceType = request.headers.get('X-Device-Type') || 'desktop';
+    const clientMemory = parseInt(request.headers.get('X-Client-Memory') || '0');
+    const totalSize = parseInt(request.headers.get('X-Total-Size') || '0');
+    const priority = request.headers.get('X-Priority') || 'normal';
+    const fileCount = files.length;
 
-          validateFileSize(file.size, index);
-          const buffer = await file.arrayBuffer();
+    // Advanced validation with size optimization
+    if (!files.length) {
+      return NextResponse.json({ error: 'No files provided' }, { status: 400 });
+    }
+
+    // Dynamic optimization based on client capabilities and request size
+    const isLowEndDevice = deviceType === 'mobile' || clientMemory < 4096;
+    const isLargeOperation = totalSize > 100 * 1024 * 1024 || fileCount > 20;
+    const isHighPriority = priority === 'high';
+
+    // Convert files to ArrayBuffer with ultra-optimized streaming
+    const bufferPromises = files.map(async (file, index) => {
+      if (!(file instanceof Blob)) {
+        throw new Error('Invalid file format');
+      }
+      
+      metrics.filesProcessed++;
+      
+      // Enhanced streaming for large files
+      if (file.size > 50 * 1024 * 1024) {
+        const chunks: Uint8Array[] = [];
+        let bytesRead = 0;
+        
+        const reader = file.stream().getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
           
-          // Run validations in parallel
-          const [isValid, isCorrupted] = await Promise.all([
-            validatePDF(new Uint8Array(buffer)),
-            isPDFCorrupted(new Uint8Array(buffer))
-          ]);
-
-          if (!isValid) {
-            throw new Error(`File ${index + 1} is not a valid PDF`);
+          chunks.push(value);
+          bytesRead += value.length;
+          metrics.bytesProcessed += value.length;
+          
+          // Monitor memory usage
+          const memUsage = process.memoryUsage().heapUsed / 1024 / 1024;
+          metrics.peakMemory = Math.max(metrics.peakMemory, memUsage);
+          
+          // Force GC if memory pressure is high
+          if (memUsage > 1024 && typeof global.gc === 'function') {
+            global.gc();
           }
-
-          if (isCorrupted) {
-            throw new Error(`File ${index + 1} appears to be corrupted`);
-          }
-
-          buffers[index] = buffer;
-        })
-      )
-    );
-
-    // Get PDF service instance
-    const pdfService = PDFService.getInstance();
-
-    // Process PDFs with optimized settings for faster processing
-    const mergedPdfBytes = await pdfService.processPDFs(buffers, {
-      optimizeImages: false, // Disable image optimization for faster processing
-      useObjectStreams: false // Disable object streams for faster processing
+        }
+        
+        // Optimize chunk concatenation
+        return chunks.length === 1 ? chunks[0].buffer : Buffer.concat(chunks).buffer;
+      }
+      
+      const buffer = await file.arrayBuffer();
+      metrics.bytesProcessed += buffer.byteLength;
+      return buffer;
     });
 
-    const processingTime = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[PDF Merge] Merge completed in ${processingTime}s`);
+    // Process in optimized dynamic batches
+    const batchSize = isLowEndDevice ? 2 : isHighPriority ? 8 : 4;
+    const buffers: ArrayBuffer[] = [];
+    
+    for (let i = 0; i < bufferPromises.length; i += batchSize) {
+      const batch = bufferPromises.slice(i, i + batchSize);
+      const results = await Promise.all(batch);
+      // Convert all buffers to ArrayBuffer type
+      const convertedBuffers = results.map(buffer => {
+        if (buffer instanceof SharedArrayBuffer) {
+          const temp = new ArrayBuffer(buffer.byteLength);
+          new Uint8Array(temp).set(new Uint8Array(buffer));
+          return temp;
+        }
+        return buffer;
+      });
+      buffers.push(...convertedBuffers);
+      
+      // Memory optimization between batches
+      if (i > 0 && i % (batchSize * 2) === 0) {
+        await new Promise(resolve => setTimeout(resolve, 1));
+        if (typeof global.gc === 'function') {
+          global.gc();
+        }
+      }
+    }
 
-    // Stream the response with optimized settings
-    const stream = new Readable();
-    stream.push(Buffer.from(mergedPdfBytes));
-    stream.push(null);
+    // Get PDF service instance with ultra-optimized settings
+    const pdfService = PDFService.getInstance();
+    const result = await pdfService.processPDFs(buffers, {
+      parallelProcessing: !isLowEndDevice,
+      optimizeOutput: true,
+      compressionLevel: isLargeOperation ? 2 : 4,
+      preserveMetadata: false,
+      parseSpeed: isLowEndDevice ? 1000 : 5000,
+      maxConcurrentOperations: isLowEndDevice ? 4 : isHighPriority ? 128 : 64,
+      memoryLimit: isLowEndDevice ? 4096 : 16384,
+      chunkSize: isLowEndDevice ? 64 : 256
+    });
 
-    const response = new NextResponse(stream as any);
+    if (!result.success) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+
+    // Ultra-optimized streaming with dynamic chunk sizing
+    const baseChunkSize = isLargeOperation ? 512 * 1024 : 2 * 1024 * 1024;
+    const chunkSize = isLowEndDevice ? baseChunkSize / 2 : baseChunkSize;
+    
+    const stream = new ReadableStream({
+      async start(controller) {
+        const data = result.data!;
+        const totalChunks = Math.ceil(data.length / chunkSize);
+        let processedSize = 0;
+        
+        for (let i = 0; i < data.length; i += chunkSize) {
+          const chunk = data.slice(i, i + chunkSize);
+          controller.enqueue(chunk);
+          
+          processedSize += chunk.length;
+          const progress = (processedSize / data.length) * 100;
+          
+          // Dynamic delay for huge files to prevent memory pressure
+          if (isLargeOperation && i > 0) {
+            const delayInterval = isLowEndDevice ? 25 * 1024 * 1024 : 100 * 1024 * 1024;
+            if (i % delayInterval === 0) {
+              await new Promise(resolve => setTimeout(resolve, isLowEndDevice ? 5 : 1));
+            }
+          }
+        }
+        controller.close();
+      }
+    });
+
+    const response = new NextResponse(stream);
+    
+    // Enhanced response headers with detailed metrics
     response.headers.set('Content-Type', 'application/pdf');
-    response.headers.set('Content-Length', mergedPdfBytes.length.toString());
-    response.headers.set('X-Processing-Time', processingTime);
-    response.headers.set('Cache-Control', 'no-store');
+    response.headers.set('Content-Length', result.data!.length.toString());
+    
+    if (result.stats) {
+      response.headers.set('X-Total-Pages', result.stats.totalPages.toString());
+      response.headers.set('X-Total-Size', result.stats.totalSize.toString());
+      response.headers.set('X-Processing-Time', result.stats.processingTime.toString());
+      response.headers.set('X-Compression-Ratio', (result.data!.length / totalSize).toFixed(2));
+      response.headers.set('X-Peak-Memory', metrics.peakMemory.toFixed(2));
+      response.headers.set('X-Files-Processed', metrics.filesProcessed.toString());
+      response.headers.set('X-Total-Time', (performance.now() - metrics.startTime).toFixed(2));
+    }
+    
+    // Optimized caching headers
+    response.headers.set('Cache-Control', 'no-store, must-revalidate');
+    response.headers.set('Pragma', 'no-cache');
+    response.headers.set('Expires', '0');
     
     return response;
 
   } catch (error) {
     console.error('[PDF Merge] Error:', error);
-
-    // Handle retries for specific errors
-    if (
-      retryCount < MAX_RETRIES && 
-      error instanceof Error && 
-      (error.message.includes('timeout') || error.message.includes('memory'))
-    ) {
-      return NextResponse.json(
-        { error: 'Processing error, please retry' },
-        { 
-          status: 503,
-          headers: {
-            'Retry-After': (RETRY_DELAY * Math.pow(2, retryCount)).toString()
-          }
-        }
-      );
-    }
-
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to merge PDFs' },
+      { 
+        error: error instanceof Error ? error.message : 'Failed to merge PDFs',
+        metrics: {
+          peakMemory: metrics.peakMemory.toFixed(2),
+          filesProcessed: metrics.filesProcessed,
+          bytesProcessed: metrics.bytesProcessed,
+          totalTime: (performance.now() - metrics.startTime).toFixed(2)
+        }
+      },
       { status: 500 }
     );
-
-  } finally {
-    clearTimeout(timeout);
   }
 } 
