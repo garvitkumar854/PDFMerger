@@ -1,23 +1,24 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'standalone',
   images: {
     domains: ['localhost'],
     formats: ['image/avif', 'image/webp'],
+    unoptimized: true,
   },
   poweredByHeader: false,
   reactStrictMode: true,
   compress: true,
   swcMinify: true,
-  compiler: {
-    removeConsole: process.env.NODE_ENV === 'production',
-  },
+  generateEtags: true,
+  distDir: '.next',
   // Simplified experimental features
   experimental: {
+    optimizeCss: true,
     optimizePackageImports: [
       '@radix-ui/react-icons',
       'lucide-react',
-      'framer-motion',
-      'pdf-lib'
+      '@emotion/react'
     ]
   },
   webpack: (config, { dev, isServer }) => {
@@ -51,6 +52,13 @@ const nextConfig = {
     // Server-side externals
     if (isServer) {
       config.externals = [...(config.externals || []), 'canvas', 'jsdom'];
+    }
+
+    // Optimize bundle size
+    config.optimization = {
+      ...config.optimization,
+      moduleIds: 'deterministic',
+      chunkIds: 'deterministic',
     }
 
     return config;

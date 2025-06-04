@@ -2,13 +2,17 @@ services:
   - type: web
     name: pdfmerger-api
     env: node
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --legacy-peer-deps && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 3001
+      - key: NEXT_TELEMETRY_DISABLED
+        value: "1"
+      - key: NPM_CONFIG_LEGACY_PEER_DEPS
+        value: "true"
     autoDeploy: true
     healthCheckPath: /api/healthcheck
     scaling:

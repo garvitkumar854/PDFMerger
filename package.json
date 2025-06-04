@@ -8,9 +8,7 @@
     "start": "next start -p 3001",
     "lint": "next lint",
     "clean": "rm -rf .next node_modules",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "postinstall": "npm run build"
   },
   "dependencies": {
     "@clerk/nextjs": "^4.29.1",
@@ -50,8 +48,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "critters": "^0.0.23",
-    "cssnano": "^7.0.7",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^10.18.0",
@@ -62,7 +58,6 @@
     "next-themes": "^0.4.6",
     "p-limit": "^6.2.0",
     "pdf-lib": "^1.17.1",
-    "postcss": "^8.4.33",
     "react": "^18.2.0",
     "react-day-picker": "^9.7.0",
     "react-dom": "^18.2.0",
@@ -76,6 +71,10 @@
     "tailwind-merge": "^2.6.0",
     "tailwindcss": "^3.4.1",
     "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.3.3",
+    "@types/node": "^20.10.6",
+    "@types/react": "^18.2.46",
+    "@types/react-dom": "^18.2.18",
     "vaul": "^1.1.2",
     "zod": "^3.22.4"
   },
@@ -84,9 +83,6 @@
     "@testing-library/react": "^14.1.2",
     "@types/jest": "^29.5.11",
     "@types/lodash": "^4.17.17",
-    "@types/node": "^20.10.6",
-    "@types/react": "^18.2.46",
-    "@types/react-dom": "^18.2.18",
     "@typescript-eslint/eslint-plugin": "^8.33.0",
     "@typescript-eslint/parser": "^8.33.0",
     "css-loader": "^7.1.2",
@@ -94,19 +90,9 @@
     "eslint-config-next": "14.0.4",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
-    "style-loader": "^4.0.0",
-    "typescript": "^5.3.3"
+    "style-loader": "^4.0.0"
   },
   "engines": {
     "node": ">=18.17.0"
-  },
-  "jest": {
-    "testEnvironment": "jsdom",
-    "setupFilesAfterEnv": [
-      "<rootDir>/jest.setup.js"
-    ],
-    "moduleNameMapper": {
-      "^@/(.*)$": "<rootDir>/$1"
-    }
   }
 }

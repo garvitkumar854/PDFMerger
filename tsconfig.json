@@ -28,7 +28,9 @@
       "@/*": [
         "./*"
       ]
-    }
+    },
+    "baseUrl": ".",
+    "allowSyntheticDefaultImports": true
   },
   "include": [
     "next-env.d.ts",
