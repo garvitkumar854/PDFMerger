@@ -6,10 +6,7 @@ const nextConfig = {
   },
   poweredByHeader: false,
   reactStrictMode: true,
-  swcMinify: true,
-  experimental: {
-    optimizePackageImports: ['@radix-ui/react-icons', 'lucide-react']
-  }
+  swcMinify: true
 }
 
 module.exports = nextConfig
