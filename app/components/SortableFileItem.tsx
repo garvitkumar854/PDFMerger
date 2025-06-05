@@ -46,29 +46,29 @@ const SortableFileItem: React.FC<SortableFileItemProps> = ({
     <div
       ref={setNodeRef}
       style={style}
-      className={`flex items-center gap-3 p-3 bg-white rounded-lg border ${
+      className={`flex items-center gap-2 p-2 sm:p-3 bg-white rounded-lg border ${
         isDragging ? 'border-blue-500 shadow-lg' : 'border-gray-200'
-      } ${disabled ? 'opacity-50' : ''}`}
+      } ${disabled ? 'opacity-50' : ''} touch-none`}
     >
       <button
         type="button"
-        className={`text-gray-400 hover:text-gray-600 ${
-          disabled ? 'cursor-not-allowed' : 'cursor-grab'
+        className={`text-gray-400 hover:text-gray-600 p-1 sm:p-0 flex-shrink-0 ${
+          disabled ? 'cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'
         }`}
         {...attributes}
         {...listeners}
         disabled={disabled}
       >
-        <FiMenu className="w-5 h-5" />
+        <FiMenu className="w-4 h-4 sm:w-5 sm:h-5" />
       </button>
 
-      <div className="flex items-center gap-2 flex-1 min-w-0">
-        <FiFileText className="w-5 h-5 text-blue-500 flex-shrink-0" />
+      <div className="flex items-center gap-1 sm:gap-2 flex-1 min-w-0">
+        <FiFileText className="w-4 h-4 sm:w-5 sm:h-5 text-blue-500 flex-shrink-0" />
         <div className="truncate">
-          <p className="text-sm sm:text-base font-medium text-gray-700 truncate">
+          <p className="text-xs sm:text-sm font-medium text-gray-700 truncate">
             {file.name}
           </p>
-          <p className="text-xs sm:text-sm text-gray-500">
+          <p className="text-[10px] sm:text-xs text-gray-500">
             {formatFileSize(file.size)}
           </p>
         </div>
@@ -78,13 +78,13 @@ const SortableFileItem: React.FC<SortableFileItemProps> = ({
         type="button"
         onClick={onRemove}
         disabled={disabled}
-        className={`p-1.5 text-gray-600 bg-gray-100 rounded-full
+        className={`p-1 sm:p-1.5 text-gray-600 bg-gray-100 rounded-full
           hover:bg-gray-200 transition-colors flex items-center justify-center
-          min-w-[24px] min-h-[24px] touch-manipulation flex-shrink-0
+          min-w-[20px] min-h-[20px] sm:min-w-[24px] sm:min-h-[24px] touch-manipulation flex-shrink-0
           ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         aria-label="Remove file"
       >
-        <FiX className="w-4 h-4" />
+        <FiX className="w-3 h-3 sm:w-4 sm:h-4" />
       </button>
     </div>
   );
