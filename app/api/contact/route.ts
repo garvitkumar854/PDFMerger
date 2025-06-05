@@ -6,43 +6,84 @@ export async function POST(request: Request) {
   try {
     // Check for API key
     if (!process.env.RESEND_API_KEY) {
-      throw new Error("Missing Resend API key");
+      console.error("Missing RESEND_API_KEY environment variable");
+      return NextResponse.json(
+        { error: "Email service configuration error" },
+        { status: 500 }
+      );
+    }
+
+    // Check for contact email
+    if (!process.env.CONTACT_EMAIL) {
+      console.error("Missing CONTACT_EMAIL environment variable");
+      return NextResponse.json(
+        { error: "Email service configuration error" },
+        { status: 500 }
+      );
     }
 
     // Initialize Resend with API key
     const resend = new Resend(process.env.RESEND_API_KEY);
 
-    const body = await request.json();
-    
+    let body;
+    try {
+      body = await request.json();
+    } catch (error) {
+      console.error("Failed to parse request body:", error);
+      return NextResponse.json(
+        { error: "Invalid request body" },
+        { status: 400 }
+      );
+    }
+
     // Validate the request body
-    const validatedData = contactFormSchema.parse(body);
+    let validatedData;
+    try {
+      validatedData = contactFormSchema.parse(body);
+    } catch (error) {
+      console.error("Validation error:", error);
+      return NextResponse.json(
+        { error: "Invalid form data" },
+        { status: 400 }
+      );
+    }
+
     const { name, email, subject, message } = validatedData;
 
-    // Send email using Resend
-    await resend.emails.send({
-      from: "PDF Merger <onboarding@resend.dev>", // Update this with your verified domain
-      to: process.env.CONTACT_EMAIL || "your-email@example.com", // The email where you want to receive messages
-      replyTo: email,
-      subject: `Contact Form: ${subject}`,
-      html: `
-        <h2>New Contact Form Submission</h2>
-        <p><strong>Name:</strong> ${name}</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Subject:</strong> ${subject}</p>
-        <p><strong>Message:</strong></p>
-        <p>${message}</p>
-      `,
-    });
+    try {
+      // Send email using Resend
+      const result = await resend.emails.send({
+        from: "PDF Merger <onboarding@resend.dev>",
+        to: process.env.CONTACT_EMAIL,
+        replyTo: email,
+        subject: `Contact Form: ${subject}`,
+        html: `
+          <h2>New Contact Form Submission</h2>
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Email:</strong> ${email}</p>
+          <p><strong>Subject:</strong> ${subject}</p>
+          <p><strong>Message:</strong></p>
+          <p>${message}</p>
+        `,
+      });
 
-    return NextResponse.json(
-      { message: "Email sent successfully" },
-      { status: 200 }
-    );
+      console.log("Email sent successfully:", result);
+
+      return NextResponse.json(
+        { message: "Email sent successfully" },
+        { status: 200 }
+      );
+    } catch (error) {
+      console.error("Failed to send email:", error);
+      return NextResponse.json(
+        { error: "Failed to send email. Please try again later." },
+        { status: 500 }
+      );
+    }
   } catch (error) {
-    console.error("Contact form error:", error);
-    const errorMessage = error instanceof Error ? error.message : "Failed to send email";
+    console.error("Unexpected error:", error);
     return NextResponse.json(
-      { error: errorMessage },
+      { error: "An unexpected error occurred" },
       { status: 500 }
     );
   }
