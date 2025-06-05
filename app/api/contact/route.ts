@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 import { Resend } from "resend";
 import { contactFormSchema } from "@/lib/schemas/contact";
 
-// Initialize Resend with your API key
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 export async function POST(request: Request) {
   try {
+    // Check for API key
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error("Missing Resend API key");
+    }
+
+    // Initialize Resend with API key
+    const resend = new Resend(process.env.RESEND_API_KEY);
+
     const body = await request.json();
     
     // Validate the request body
@@ -35,8 +40,9 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     console.error("Contact form error:", error);
+    const errorMessage = error instanceof Error ? error.message : "Failed to send email";
     return NextResponse.json(
-      { error: "Failed to send email" },
+      { error: errorMessage },
       { status: 500 }
     );
   }
