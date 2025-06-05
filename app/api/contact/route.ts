@@ -17,7 +17,7 @@ export async function POST(request: Request) {
     await resend.emails.send({
       from: "PDF Merger <onboarding@resend.dev>", // Update this with your verified domain
       to: process.env.CONTACT_EMAIL || "your-email@example.com", // The email where you want to receive messages
-      reply_to: email,
+      replyTo: email,
       subject: `Contact Form: ${subject}`,
       html: `
         <h2>New Contact Form Submission</h2>
