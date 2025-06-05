@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { PDFService } from '@/lib/services/pdf-service';
 import { Readable } from 'stream';
 
-// Configure for maximum performance
+// Configure for maximum performance within Vercel hobby plan limits
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 600; // Increased to 10 minutes for large merges
+export const maxDuration = 60; // Set to maximum allowed for Vercel hobby plan (60 seconds)
 
 // Advanced performance metrics
 const metrics = {
