@@ -65,10 +65,10 @@ const SortableFileItem: React.FC<SortableFileItemProps> = ({
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <FiFileText className="w-5 h-5 text-blue-500 flex-shrink-0" />
         <div className="truncate">
-          <p className="text-sm font-medium text-gray-700 truncate">
+          <p className="text-sm sm:text-base font-medium text-gray-700 truncate">
             {file.name}
           </p>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs sm:text-sm text-gray-500">
             {formatFileSize(file.size)}
           </p>
         </div>
@@ -80,7 +80,7 @@ const SortableFileItem: React.FC<SortableFileItemProps> = ({
         disabled={disabled}
         className={`p-1.5 text-gray-600 bg-gray-100 rounded-full
           hover:bg-gray-200 transition-colors flex items-center justify-center
-          min-w-[24px] min-h-[24px] touch-manipulation
+          min-w-[24px] min-h-[24px] touch-manipulation flex-shrink-0
           ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         aria-label="Remove file"
       >

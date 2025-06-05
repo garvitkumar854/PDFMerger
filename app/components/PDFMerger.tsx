@@ -151,6 +151,15 @@ const PDFMerger: React.FC = () => {
           modifiers={[restrictToVerticalAxis]}
           onDragEnd={handleDragEnd}
         >
+          {files.length > 0 && (
+            <button
+              onClick={() => setFiles([])}
+              disabled={isProcessing}
+              className="mb-4 px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors text-sm sm:text-base w-full sm:w-auto"
+            >
+              Clear All
+            </button>
+          )}
           <SortableContext 
             items={files.map(file => `file-${file.path}`)}
             strategy={rectSortingStrategy}
