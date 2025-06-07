@@ -5,32 +5,32 @@ import pLimit from 'p-limit';
 
 // Optimized limits for maximum performance
 const LIMITS = {
-  MEMORY: 32768 * 1024 * 1024,  // 32GB memory limit for massive files
-  MAX_FILES: 2000,               // Increased max files for batch processing
-  MAX_FILE_SIZE: 8192 * 1024 * 1024, // 8GB per file
-  MAX_TOTAL_SIZE: 32768 * 1024 * 1024, // 32GB total
-  CACHE_SIZE: 1024 * 1024 * 1024, // 1GB cache size
-  MAX_CACHE_ENTRIES: 2000,       // Maximum number of cache entries
-  SMALL_FILE_THRESHOLD: 10 * 1024 * 1024, // 10MB threshold for small files
-  LARGE_FILE_THRESHOLD: 100 * 1024 * 1024 // 100MB threshold for large files
+  MEMORY: 4096 * 1024 * 1024,    // 4GB memory limit for browser compatibility
+  MAX_FILES: 20,                 // Limit to 20 files as per requirement
+  MAX_FILE_SIZE: 200 * 1024 * 1024, // 200MB per file
+  MAX_TOTAL_SIZE: 200 * 1024 * 1024, // 200MB total as per requirement
+  CACHE_SIZE: 512 * 1024 * 1024,  // 512MB cache size for browser memory constraints
+  MAX_CACHE_ENTRIES: 50,         // Reduced cache entries for better memory management
+  SMALL_FILE_THRESHOLD: 20 * 1024 * 1024, // 20MB threshold for small files
+  LARGE_FILE_THRESHOLD: 50 * 1024 * 1024  // 50MB threshold for large files
 };
 
 // Ultra-performance processing constants
 const PROCESSING = {
-  CHUNK_SIZE: 2048 * 1024 * 1024,    // 2GB chunks for maximum throughput
-  PAGE_INTERVAL: 10000,              // Increased batch size for extreme throughput
-  CLEANUP_INTERVAL: 20000,           // Less frequent cleanup for better performance
-  MEMORY_THRESHOLD: 0.90,            // Optimized memory threshold
-  PARSE_SPEED: 500000,              // Maximum possible parsing speed
-  BATCH_DELAY: 0,                   // No delays for maximum speed
-  MAX_CONCURRENT_OPERATIONS: 512,    // Maximum parallel operations
-  WORKER_THREADS: 256,              // Maximum worker threads
-  BATCH_SIZE: 256,                  // Increased batch size
-  SUB_BATCH_SIZE: 1000,            // Larger sub-batch size
-  GC_INTERVAL: 100000,             // Garbage collection interval
-  STREAM_CHUNK_SIZE: 4 * 1024 * 1024, // 4MB streaming chunks
-  SMALL_FILE_BATCH_SIZE: 50,        // Batch size for small files
-  LARGE_FILE_BATCH_SIZE: 10         // Batch size for large files
+  CHUNK_SIZE: 20 * 1024 * 1024,      // 20MB chunks for optimal browser performance
+  PAGE_INTERVAL: 1000,               // Reduced batch size for better memory usage
+  CLEANUP_INTERVAL: 5000,            // More frequent cleanup
+  MEMORY_THRESHOLD: 0.75,            // Lower memory threshold for stability
+  PARSE_SPEED: 100000,               // Balanced parsing speed
+  BATCH_DELAY: 10,                   // Small delay for browser responsiveness
+  MAX_CONCURRENT_OPERATIONS: 8,      // Limited concurrent operations for stability
+  WORKER_THREADS: 4,                 // Reduced worker threads for browser compatibility
+  BATCH_SIZE: 64,                    // Optimized batch size
+  SUB_BATCH_SIZE: 250,               // Smaller sub-batch size for better memory management
+  GC_INTERVAL: 25000,                // More frequent garbage collection
+  STREAM_CHUNK_SIZE: 5 * 1024 * 1024, // 5MB streaming chunks for better performance
+  SMALL_FILE_BATCH_SIZE: 20,         // Adjusted batch size for small files
+  LARGE_FILE_BATCH_SIZE: 5           // Adjusted batch size for large files
 };
 
 interface PDFStats {
@@ -784,4 +784,4 @@ export class PDFService {
       .map(b => b.toString(16).padStart(2, '0'))
       .join('');
   }
-} 
+}

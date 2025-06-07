@@ -1,57 +1,51 @@
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
+import { LRUCache } from 'lru-cache';
 
-const RATE_LIMIT = 10; // requests
-const RATE_LIMIT_WINDOW = 60; // seconds
+interface RateLimitOptions {
+  interval: number;
+  uniqueTokenPerInterval: number;
+  maxRequests: number;
+}
 
-export async function rateLimit(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] ?? request.headers.get('x-real-ip') ?? 'anonymous';
-  const key = `rate-limit:${ip}`;
-  const now = Date.now();
-  const windowStart = now - RATE_LIMIT_WINDOW * 1000;
+class RateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RateLimitError';
+  }
+}
 
-  // Use response headers to track rate limit info
-  let count = 1;
-  let resetTime = now + RATE_LIMIT_WINDOW * 1000;
-
-  // Get rate limit info from request headers
-  const lastRequest = request.headers.get('x-last-request');
-  const lastCount = request.headers.get('x-request-count');
-
-  if (lastRequest && lastCount) {
-    const lastTimestamp = parseInt(lastRequest, 10);
-    if (lastTimestamp > windowStart) {
-      count = parseInt(lastCount, 10) + 1;
-    }
+export function rateLimit(options: RateLimitOptions) {
+  if (!options.interval || options.interval < 0) {
+    throw new Error('Invalid interval value');
   }
 
-  if (count > RATE_LIMIT) {
-    return new NextResponse(
-      JSON.stringify({
-        error: 'Too many requests',
-        message: 'Please try again later',
-      }),
-      {
-        status: 429,
-        headers: {
-          'Content-Type': 'application/json',
-          'Retry-After': RATE_LIMIT_WINDOW.toString(),
-          'X-RateLimit-Limit': RATE_LIMIT.toString(),
-          'X-RateLimit-Remaining': '0',
-          'X-RateLimit-Reset': resetTime.toString(),
-        },
+  if (!options.uniqueTokenPerInterval || options.uniqueTokenPerInterval < 0) {
+    throw new Error('Invalid uniqueTokenPerInterval value');
+  }
+
+  // Create LRUCache with updated options for v11.x
+  const tokenCache = new LRUCache<string, number>({
+    max: options.uniqueTokenPerInterval,
+    ttl: options.interval,
+    allowStale: false
+  });
+
+  return {
+    check: async (): Promise<void> => {
+      const tokenCount = tokenCache.get('requests') || 0;
+      const currentCount = tokenCount + 1;
+
+      if (currentCount > options.maxRequests) {
+        throw new RateLimitError('Rate limit exceeded');
       }
-    );
-  }
 
-  // Return rate limit info in response headers
-  const response = null;
-  const headers = new Headers();
-  headers.set('X-RateLimit-Limit', RATE_LIMIT.toString());
-  headers.set('X-RateLimit-Remaining', (RATE_LIMIT - count).toString());
-  headers.set('X-RateLimit-Reset', resetTime.toString());
-  headers.set('X-Last-Request', now.toString());
-  headers.set('X-Request-Count', count.toString());
-
-  return response;
+      tokenCache.set('requests', currentCount);
+    },
+    remaining: async (): Promise<number> => {
+      const tokenCount = tokenCache.get('requests') || 0;
+      return Math.max(0, options.maxRequests - tokenCount);
+    },
+    getTokenCount: (): number => {
+      return tokenCache.get('requests') || 0;
+    }
+  };
 }
