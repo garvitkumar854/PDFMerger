@@ -64,7 +64,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body 
-        className={`${inter.className} min-h-screen bg-background antialiased`}
+        className={`${inter.className} min-h-screen bg-background antialiased touch-manipulation`}
         suppressHydrationWarning
       >
         <ClerkProvider>

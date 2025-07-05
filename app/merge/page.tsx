@@ -193,8 +193,8 @@ const SortableFileItem = React.forwardRef<HTMLDivElement, SortableFileItemProps>
   } = useSortable({ 
     id: file.id,
     transition: {
-      duration: 150,
-      easing: "ease"
+      duration: 100, // Faster transition for better responsiveness
+      easing: "ease-out"
     }
   });
 
@@ -226,44 +226,47 @@ const SortableFileItem = React.forwardRef<HTMLDivElement, SortableFileItemProps>
       exit="exit"
       layoutId={file.id}
       className={cn(
-        "flex items-center justify-between p-3 rounded-lg border bg-background/50",
-        "group hover:border-primary/20",
+        "flex items-center justify-between p-2 sm:p-3 rounded-lg border bg-background/50",
+        "group hover:border-primary/20 touch-manipulation",
         isDragging ? "border-primary shadow-lg bg-background z-50" : "hover:bg-primary/5",
         over ? "opacity-50 scale-95 transition-all duration-200" : ""
       )}
     >
       <div 
         className={cn(
-          "flex items-center gap-3 flex-1 min-w-0",
+          "flex items-center gap-2 sm:gap-3 flex-1 min-w-0 touch-manipulation",
           isDragging ? "cursor-grabbing" : "cursor-grab"
         )}
         {...attributes} 
         {...listeners}
       >
         <motion.div 
-          whileHover={{ scale: 1.1 }}
-          whileTap={{ scale: 0.95 }}
-          transition={{ type: "spring", stiffness: 400, damping: 25 }}
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.9 }}
+          transition={{ type: "spring", stiffness: 300, damping: 20 }}
+          className="touch-manipulation"
         >
           <GripVertical className={cn(
-            "h-5 w-5 flex-shrink-0",
+            "h-4 w-4 sm:h-5 sm:w-5 flex-shrink-0",
             isDragging ? "text-primary" : "text-muted-foreground"
           )} />
         </motion.div>
-        <div className="flex items-center gap-3 truncate flex-1 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 truncate flex-1 min-w-0">
           <div className="relative">
             <FileText className={cn(
-              "h-5 w-5 flex-shrink-0",
+              "h-4 w-4 sm:h-5 sm:w-5 flex-shrink-0",
               isDragging ? "text-primary" : "text-primary/80"
             )} />
           </div>
-          <span className={cn(
-            "font-medium truncate",
-            isDragging && "text-primary"
-          )}>{file.name}</span>
-          <span className="text-sm text-muted-foreground whitespace-nowrap">
-            ({(file.size / (1024 * 1024)).toFixed(1)} MB)
-          </span>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-0.5 sm:gap-2 min-w-0 flex-1">
+            <span className={cn(
+              "font-medium truncate text-sm sm:text-base",
+              isDragging && "text-primary"
+            )}>{file.name}</span>
+            <span className="text-xs sm:text-sm text-muted-foreground whitespace-nowrap">
+              ({(file.size / (1024 * 1024)).toFixed(1)} MB)
+            </span>
+          </div>
         </div>
       </div>
       <Button
@@ -271,11 +274,11 @@ const SortableFileItem = React.forwardRef<HTMLDivElement, SortableFileItemProps>
         size="icon"
         onClick={() => onRemove(file)}
         className={cn(
-          "h-8 w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-2",
-          "opacity-0 group-hover:opacity-100 sm:opacity-100 transition-opacity duration-200"
+          "h-7 w-7 sm:h-8 sm:w-8 hover:text-destructive hover:bg-destructive/10 flex-shrink-0 ml-1 sm:ml-2",
+          "opacity-100 transition-opacity duration-200 touch-manipulation"
         )}
       >
-        <X className="h-4 w-4" />
+        <X className="h-3 w-3 sm:h-4 sm:w-4" />
       </Button>
     </motion.div>
   );
@@ -356,19 +359,20 @@ export default function MergePDF() {
   const { toast } = useToast();
   const { isLoaded, userId } = useAuth();
   const router = useRouter();
+  const [processingPhase, setProcessingPhase] = useState<string>('');
 
-  // Move sensors configuration inside the component
+  // Optimized sensors configuration for better mobile performance
   const sensors = useSensors(
     useSensor(TouchSensor, {
       activationConstraint: {
-        delay: 250, // Delay before activating drag
-        tolerance: 8, // Movement tolerance
-        distance: 2, // Minimum distance before activating
+        delay: 150, // Reduced delay for faster response
+        tolerance: 5, // Reduced tolerance for better precision
+        distance: 3, // Slightly higher distance to prevent accidental drags
       }
     }),
     useSensor(PointerSensor, {
       activationConstraint: {
-        distance: 8, // Distance in pixels before activating
+        distance: 5, // Reduced distance for faster activation
         delay: 0 // No delay for pointer events
       }
     }),
@@ -533,6 +537,10 @@ export default function MergePDF() {
 
     setIsMerging(true);
     setMergeProgress(0);
+    setProcessingPhase('Preparing files...');
+    
+    // Create abort controller for cancellation
+    abortControllerRef.current = new AbortController();
     let progressInterval: NodeJS.Timeout | undefined;
 
     // Clear previous merged PDF URL
@@ -547,26 +555,31 @@ export default function MergePDF() {
       const expectedProcessingTime = estimateProcessingTime(totalSize, totalPages, files.length);
       console.log(`[PDF Merge] Expected processing time: ${expectedProcessingTime}s`);
 
-      // Stage 1: Initial preparation (0-10%)
-      progressInterval = await simulateProgress(0, 10, 1000, progressInterval, setMergeProgress);
+      // Stage 1: Initial preparation (0-15%) - Faster
+      setProcessingPhase('Preparing files...');
+      progressInterval = await simulateProgress(0, 15, 500, progressInterval, setMergeProgress);
 
-      // Stage 2: File validation (10-25%)
-      progressInterval = await simulateProgress(10, 25, 1500, progressInterval, setMergeProgress);
+      // Stage 2: File validation (15-30%) - Faster
+      setProcessingPhase('Validating PDFs...');
+      progressInterval = await simulateProgress(15, 30, 800, progressInterval, setMergeProgress);
 
       // Process files with progress tracking
       const formData = new FormData();
       files.forEach(file => formData.append('files', file.file));
 
+      setProcessingPhase('Uploading files...');
       const response = await fetch("/api/merge", {
         method: "POST",
         body: formData,
+        signal: abortControllerRef.current?.signal,
         headers: {
           "X-Request-ID": Math.random().toString(36).substring(7),
           "X-Retry-Count": retryCount.toString(),
           "X-Total-Size": totalSize.toString(),
           "X-File-Count": files.length.toString(),
           "X-Device-Type": window.innerWidth < 768 ? 'mobile' : 'desktop',
-          "X-Expected-Time": expectedProcessingTime.toString()
+          "X-Expected-Time": expectedProcessingTime.toString(),
+          "X-Priority": "high"
         }
       });
 
@@ -588,7 +601,8 @@ export default function MergePDF() {
         throw new Error(errorData.error || "Failed to merge PDFs");
       }
 
-      // Stage 3: Processing response (25-60%)
+      // Stage 3: Processing response (30-70%)
+      setProcessingPhase('Merging PDFs...');
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Failed to get response reader");
 
@@ -597,7 +611,7 @@ export default function MergePDF() {
       const contentLength = parseInt(response.headers.get('Content-Length') || '0');
       const startTime = Date.now();
 
-      // Stage 4: Reading and processing chunks (60-85%)
+      // Stage 4: Reading and processing chunks (70-90%)
       while (true) {
         const { done, value } = await reader.read();
         
@@ -608,21 +622,23 @@ export default function MergePDF() {
         
         // Calculate progress for chunk processing
         const chunkProgress = Math.min(
-          60 + ((receivedLength / contentLength) * 25),
-          85
+          70 + ((receivedLength / contentLength) * 20),
+          90
         );
         setMergeProgress(Math.floor(chunkProgress));
       }
 
-      // Stage 5: Final processing (85-95%)
-      progressInterval = await simulateProgress(85, 95, 1000, progressInterval, setMergeProgress);
+      // Stage 5: Final processing (90-98%)
+      setProcessingPhase('Finalizing...');
+      progressInterval = await simulateProgress(90, 98, 300, progressInterval, setMergeProgress);
 
       // Create blob and URL
       const blob = new Blob(chunks, { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       
-      // Stage 6: Completion (95-100%)
-      progressInterval = await simulateProgress(95, 100, 500, progressInterval, setMergeProgress);
+      // Stage 6: Completion (98-100%)
+      setProcessingPhase('Complete!');
+      progressInterval = await simulateProgress(98, 100, 200, progressInterval, setMergeProgress);
       
       setMergedPdfUrl(url);
       setIsComplete(true);
@@ -638,6 +654,13 @@ export default function MergePDF() {
 
     } catch (error) {
       console.error("[PDF Merge] Error:", error);
+      
+      // Check if it's an abort error (cancellation)
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.log("[PDF Merge] Request was cancelled");
+        return;
+      }
+      
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
       toast({
@@ -649,6 +672,7 @@ export default function MergePDF() {
 
       setIsComplete(false);
       setMergeProgress(0);
+      setProcessingPhase('');
       if (mergedPdfUrl) {
         URL.revokeObjectURL(mergedPdfUrl);
         setMergedPdfUrl(null);
@@ -658,8 +682,9 @@ export default function MergePDF() {
         clearInterval(progressInterval);
       }
       setIsMerging(false);
+      setProcessingPhase('');
     }
-  }, [files, mergedPdfUrl, toast, simulateProgress]);
+      }, [files, mergedPdfUrl, toast, simulateProgress]);
 
   // Helper function to calculate total pages
   const calculateTotalPages = async (files: FileItem[]): Promise<number> => {
@@ -771,6 +796,21 @@ export default function MergePDF() {
     }
   `;
 
+  const handleCancelMerge = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsMerging(false);
+    setMergeProgress(0);
+    setProcessingPhase('');
+    toast({
+      title: "Merge cancelled",
+      description: "PDF merging has been cancelled",
+      variant: "default",
+    });
+  }, [toast]);
+
   if (!isLoaded || !userId) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -790,10 +830,10 @@ export default function MergePDF() {
       variants={containerVariants}
       className="min-h-screen bg-gradient-to-b from-background to-background/80"
     >
-      <div className="container mx-auto py-3 sm:py-6 px-3 sm:px-6 lg:max-w-4xl xl:max-w-5xl">
+      <div className="container mx-auto py-2 sm:py-6 px-2 sm:px-6 lg:max-w-4xl xl:max-w-5xl">
         <motion.div 
           variants={itemVariants} 
-          className="flex flex-col sm:flex-row items-center justify-between gap-3 mb-4 sm:mb-8"
+          className="flex flex-col sm:flex-row items-center justify-between gap-2 sm:gap-3 mb-3 sm:mb-8"
         >
           <Link 
             href="/" 
@@ -814,7 +854,7 @@ export default function MergePDF() {
             <motion.div
               key="upload"
               variants={itemVariants}
-              className="space-y-3 sm:space-y-4 lg:space-y-6"
+              className="space-y-2 sm:space-y-4 lg:space-y-6"
             >
               <div className="relative">
                 <div className="absolute inset-0 bg-gradient-to-r from-primary/20 via-primary/10 to-primary/20 rounded-lg sm:rounded-xl blur-xl" />
@@ -840,7 +880,7 @@ export default function MergePDF() {
               </div>
 
               {files.length > 0 && (
-                <div className="space-y-3 bg-card/95 p-3 sm:p-5 rounded-lg sm:rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm">
+                <div className="space-y-2 sm:space-y-3 bg-card/95 p-2 sm:p-5 rounded-lg sm:rounded-xl shadow-lg border border-primary/20 backdrop-blur-sm">
                   <div className="space-y-2">
                     <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
                       <div className="space-y-0.5 w-full sm:w-auto">
@@ -879,7 +919,7 @@ export default function MergePDF() {
                         variants={containerVariants}
                         initial="hidden"
                         animate="visible"
-                        className="space-y-1.5 max-h-[calc(100vh-300px)] sm:max-h-[250px] overflow-y-auto overscroll-contain custom-scrollbar"
+                        className="space-y-1.5 max-h-[calc(100vh-400px)] sm:max-h-[250px] overflow-y-auto overscroll-contain custom-scrollbar touch-manipulation"
                       >
                         <AnimatePresence mode="popLayout">
                           {files.map((file) => (
@@ -896,23 +936,27 @@ export default function MergePDF() {
 
                   {files.length >= 2 ? (
                     <div className="space-y-2">
-                      <Button
-                        onClick={() => handleMerge(0)}
-                        disabled={isMerging || files.length < 2}
-                        className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-3 sm:py-4 text-sm sm:text-base"
-                      >
-                        {isMerging ? (
-                          <>
-                            <div className="mr-2 h-4 w-4 animate-spin border-2 border-primary-foreground border-t-transparent rounded-full" />
-                            Merging PDFs...
-                          </>
-                        ) : (
-                          <>
-                            <CheckCircle2 className="mr-2 h-4 w-4" />
-                            Merge {files.length} PDFs
-                          </>
-                        )}
-                      </Button>
+                      {!isMerging ? (
+                        <Button
+                          onClick={() => handleMerge(0)}
+                          disabled={files.length < 2}
+                          className="w-full bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 transition-all duration-300 py-3 sm:py-4 text-sm sm:text-base"
+                        >
+                          <CheckCircle2 className="mr-2 h-4 w-4" />
+                          Merge {files.length} PDFs
+                        </Button>
+                      ) : (
+                        <div className="flex gap-2">
+                          <Button
+                            onClick={handleCancelMerge}
+                            variant="destructive"
+                            className="flex-1 py-3 sm:py-4 text-sm sm:text-base"
+                          >
+                            <X className="mr-2 h-4 w-4" />
+                            Cancel
+                          </Button>
+                        </div>
+                      )}
 
                       {isMerging && (
                         <motion.div 
@@ -952,7 +996,7 @@ export default function MergePDF() {
                             animate={{ opacity: 1 }}
                             transition={{ delay: 0.2 }}
                           >
-                            Processing... {Math.round(mergeProgress)}%
+                            {processingPhase} {Math.round(mergeProgress)}%
                           </motion.p>
                         </motion.div>
                       )}

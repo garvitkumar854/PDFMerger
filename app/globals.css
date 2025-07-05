@@ -56,13 +56,32 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground antialiased min-h-screen;
+    @apply bg-background text-foreground antialiased min-h-screen touch-manipulation;
   }
   h1, h2, h3, h4, h5, h6 {
     @apply font-poppins tracking-tight;
   }
   p {
     @apply font-rubik;
+  }
+  
+  /* Optimize touch interactions */
+  button, a, [role="button"] {
+    @apply touch-manipulation;
+  }
+  
+  /* Improve scrolling performance */
+  * {
+    scroll-behavior: smooth;
+  }
+  
+  /* Optimize animations for mobile */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }
 
@@ -100,6 +119,26 @@
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
   @apply bg-primary/20 rounded-full hover:bg-primary/30 transition-colors;
+}
+
+/* Mobile optimizations */
+@media (max-width: 768px) {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  
+  /* Improve touch targets */
+  button, a, [role="button"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Optimize text rendering */
+  * {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 }
 
 /* Glass Effect */

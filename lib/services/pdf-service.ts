@@ -18,20 +18,20 @@ const LIMITS = {
 
 // Ultra-performance processing constants
 const PROCESSING = {
-  CHUNK_SIZE: 20 * 1024 * 1024,      // 20MB chunks for optimal browser performance
-  PAGE_INTERVAL: 1000,               // Reduced batch size for better memory usage
-  CLEANUP_INTERVAL: 5000,            // More frequent cleanup
-  MEMORY_THRESHOLD: 0.75,            // Lower memory threshold for stability
-  PARSE_SPEED: 100000,               // Balanced parsing speed
-  BATCH_DELAY: 10,                   // Small delay for browser responsiveness
-  MAX_CONCURRENT_OPERATIONS: 8,      // Limited concurrent operations for stability
-  WORKER_THREADS: 4,                 // Reduced worker threads for browser compatibility
-  BATCH_SIZE: 64,                    // Optimized batch size
-  SUB_BATCH_SIZE: 250,               // Smaller sub-batch size for better memory management
-  GC_INTERVAL: 25000,                // More frequent garbage collection
-  STREAM_CHUNK_SIZE: 5 * 1024 * 1024, // 5MB streaming chunks for better performance
-  SMALL_FILE_BATCH_SIZE: 20,         // Adjusted batch size for small files
-  LARGE_FILE_BATCH_SIZE: 5           // Adjusted batch size for large files
+  CHUNK_SIZE: 50 * 1024 * 1024,      // 50MB chunks for faster processing
+  PAGE_INTERVAL: 500,                // Faster batch processing
+  CLEANUP_INTERVAL: 3000,            // More frequent cleanup
+  MEMORY_THRESHOLD: 0.8,             // Higher memory threshold for speed
+  PARSE_SPEED: 200000,               // Faster parsing speed
+  BATCH_DELAY: 5,                    // Minimal delay for responsiveness
+  MAX_CONCURRENT_OPERATIONS: 16,     // More concurrent operations for speed
+  WORKER_THREADS: 8,                 // More worker threads for speed
+  BATCH_SIZE: 128,                   // Larger batch size for speed
+  SUB_BATCH_SIZE: 500,               // Larger sub-batch size for speed
+  GC_INTERVAL: 15000,                // Less frequent GC for speed
+  STREAM_CHUNK_SIZE: 10 * 1024 * 1024, // 10MB streaming chunks for speed
+  SMALL_FILE_BATCH_SIZE: 50,         // Larger batch size for small files
+  LARGE_FILE_BATCH_SIZE: 10          // Larger batch size for large files
 };
 
 interface PDFStats {

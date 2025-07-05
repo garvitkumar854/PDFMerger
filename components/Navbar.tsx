@@ -28,7 +28,7 @@ export default function Navbar() {
       animate={{ y: 0 }}
       className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60"
     >
-      <div className="container mx-auto px-4">
+      <div className="container mx-auto px-3 sm:px-4">
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
           <div className="flex items-center">
@@ -39,7 +39,7 @@ export default function Navbar() {
               >
                 <FileText className="h-6 w-6 text-primary" />
               </motion.div>
-              <span className="font-bold text-xl bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/60">
+              <span className="font-bold text-lg sm:text-xl bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/60">
                 PDF Merger
               </span>
             </Link>
@@ -104,7 +104,7 @@ export default function Navbar() {
         animate={{ height: isMenuOpen ? "auto" : 0 }}
         className="md:hidden overflow-hidden"
       >
-        <nav className="container mx-auto px-4 py-4 space-y-4">
+        <nav className="container mx-auto px-3 sm:px-4 py-4 space-y-4">
           {navItems.map((item) => (
             <Link
               key={item.href}

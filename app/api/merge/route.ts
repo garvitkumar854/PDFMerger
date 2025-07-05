@@ -44,8 +44,18 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const formData = await request.formData();
-    const files = formData.getAll('files');
+    let formData: FormData;
+    let files: FormDataEntryValue[];
+    
+    try {
+      formData = await request.formData();
+      files = formData.getAll('files');
+    } catch (error) {
+      console.error('FormData parsing error:', error);
+      return NextResponse.json({ 
+        error: 'Invalid request format. Please ensure files are properly uploaded.' 
+      }, { status: 400 });
+    }
     
     // Enhanced request metadata
     const deviceType = request.headers.get('X-Device-Type') || 'desktop';
@@ -55,13 +65,23 @@ export async function POST(request: NextRequest) {
     const fileCount = files.length;
 
     // Advanced validation with size optimization
-    if (!files.length) {
+    if (!files || !Array.isArray(files) || files.length === 0) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 });
     }
 
     // Validate file count
     if (fileCount > 20) {
       return NextResponse.json({ error: 'Maximum 20 files allowed' }, { status: 400 });
+    }
+
+    // Validate each file
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!(file instanceof Blob)) {
+        return NextResponse.json({ 
+          error: `Invalid file format at position ${i + 1}. Please ensure all files are valid PDFs.` 
+        }, { status: 400 });
+      }
     }
 
     // Dynamic optimization based on client capabilities and request size
@@ -71,8 +91,9 @@ export async function POST(request: NextRequest) {
 
     // Convert files to ArrayBuffer with ultra-optimized streaming
     const bufferPromises = files.map(async (file, index) => {
+      // File validation already done above, but double-check
       if (!(file instanceof Blob)) {
-        throw new Error('Invalid file format');
+        throw new Error(`Invalid file format at position ${index + 1}`);
       }
       
       metrics.filesProcessed++;
@@ -122,8 +143,8 @@ export async function POST(request: NextRequest) {
       return buffer;
     });
 
-    // Process in optimized dynamic batches
-    const batchSize = isLowEndDevice ? 2 : isHighPriority ? 8 : 4;
+    // Process in optimized dynamic batches - Faster processing
+    const batchSize = isLowEndDevice ? 4 : isHighPriority ? 16 : 8;
     const buffers: ArrayBuffer[] = [];
     
     for (let i = 0; i < bufferPromises.length; i += batchSize) {
@@ -140,9 +161,8 @@ export async function POST(request: NextRequest) {
       });
       buffers.push(...convertedBuffers);
       
-      // Memory optimization between batches
-      if (i > 0 && i % (batchSize * 2) === 0) {
-        await new Promise(resolve => setTimeout(resolve, 1));
+      // Minimal memory optimization for speed
+      if (i > 0 && i % (batchSize * 4) === 0) {
         if (typeof global.gc === 'function') {
           global.gc();
         }
@@ -155,19 +175,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Total file size exceeds 200MB limit' }, { status: 400 });
     }
 
-    // Get PDF service instance with ultra-optimized settings
+    // Get PDF service instance with ultra-optimized settings for speed
     const pdfService = PDFService.getInstance();
     const result = await pdfService.processPDFs(buffers, {
-      parallelProcessing: !isLowEndDevice,
+      parallelProcessing: true, // Always use parallel processing for speed
       optimizeOutput: true,
-      compressionLevel: isLargeOperation ? 2 : 4,
+      compressionLevel: isLargeOperation ? 1 : 2, // Lower compression for speed
       preserveMetadata: false,
-      parseSpeed: isLowEndDevice ? 1000 : 5000,
-      maxConcurrentOperations: isLowEndDevice ? 4 : isHighPriority ? 128 : 64,
-      memoryLimit: isLowEndDevice ? 4096 : 16384,
-      chunkSize: isLowEndDevice ? 64 : 256,
+      parseSpeed: isLowEndDevice ? 2000 : 10000, // Much faster parsing
+      maxConcurrentOperations: isLowEndDevice ? 8 : isHighPriority ? 256 : 128, // More concurrent operations
+      memoryLimit: isLowEndDevice ? 8192 : 32768, // Higher memory limits
+      chunkSize: isLowEndDevice ? 128 : 512, // Larger chunks for speed
       removeAnnotations: false,
-      optimizeImages: true
+      optimizeImages: false // Disable image optimization for speed
     });
 
     if (!result.success) {

@@ -26,8 +26,8 @@ const formatFileSize = (bytes: number): string => {
 
 // Add this component after the LIMITS constant
 const FileUploadLimits = () => (
-  <div className="space-y-1 text-sm text-muted-foreground/80">
-    <div className="flex items-center justify-center gap-4 text-center">
+  <div className="space-y-1 text-xs sm:text-sm text-muted-foreground/80">
+    <div className="flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-4 text-center">
       <span>📄 Max {LIMITS.MAX_FILES} files</span>
       <span>📦 {formatFileSize(LIMITS.MAX_FILE_SIZE)}/file</span>
       <span>💾 {formatFileSize(LIMITS.MAX_TOTAL_SIZE)} total</span>
@@ -448,11 +448,11 @@ export function FileUpload({
           }}
           style={{ transform: 'none' }}
           className={cn(
-            "relative overflow-hidden rounded-lg sm:rounded-xl border-2 group/upload p-2 sm:p-[14px]",
+            "relative overflow-hidden rounded-lg sm:rounded-xl border-2 group/upload p-1.5 sm:p-[14px]",
             isDragActive 
               ? "border-primary bg-primary/5" 
               : "border-muted/40",
-            "transition-all duration-200 ease-out bg-background/95 shadow-lg backdrop-blur-sm"
+            "transition-all duration-200 ease-out bg-background/95 shadow-lg backdrop-blur-sm touch-manipulation"
           )}
         >
           {/* Progress Animation */}
@@ -482,10 +482,10 @@ export function FileUpload({
           )} />
 
           {/* Content wrapper */}
-          <div className="relative px-4 sm:px-7 py-6 sm:py-9">
+          <div className="relative px-3 sm:px-7 py-4 sm:py-9">
             <input {...getInputProps()} />
             
-            <div className="relative flex flex-col items-center justify-center gap-5 sm:gap-8">
+            <div className="relative flex flex-col items-center justify-center gap-3 sm:gap-8">
               {/* Icon with animation */}
               <motion.div
                 initial={false}
@@ -509,10 +509,10 @@ export function FileUpload({
               >
                 <div className="relative">
                   {isValidating ? (
-                    <Loader2 className="h-12 w-12 sm:h-16 sm:w-16 text-primary animate-spin" />
+                    <Loader2 className="h-10 w-10 sm:h-16 sm:w-16 text-primary animate-spin" />
                   ) : (
                     <Upload className={cn(
-                      "h-12 w-12 sm:h-16 sm:w-16",
+                      "h-10 w-10 sm:h-16 sm:w-16",
                       isDragActive 
                         ? "text-primary" 
                         : "text-muted-foreground group-hover/upload:text-primary/80",
@@ -538,7 +538,7 @@ export function FileUpload({
               {/* Main text content */}
               <div className="space-y-2 text-center">
                 <motion.h3 
-                  className="text-lg font-semibold"
+                  className="text-base sm:text-lg font-semibold"
                   animate={{ 
                     scale: isValidating ? [1, 1.02, 1] : 1,
                     opacity: isValidating ? [1, 0.7, 1] : 1
@@ -553,7 +553,7 @@ export function FileUpload({
                     ? 'Processing files...' 
                     : (isDragActive ? dragMessage : customText?.main || 'Drop PDFs here')}
                 </motion.h3>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-xs sm:text-sm text-muted-foreground">
                   {isValidating 
                     ? `${Math.round(progress)}% complete...`
                     : (customText?.details || 'or click to select files')}
