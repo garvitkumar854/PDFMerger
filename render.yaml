@@ -12,7 +12,7 @@ services:
       - key: NEXT_TELEMETRY_DISABLED
         value: "1"
       - key: FRONTEND_URL
-        value: "https://your-frontend-domain.vercel.app"
+        value: "https://pdf-merger-eight-blond.vercel.app"
     autoDeploy: true
     healthCheckPath: /api/healthcheck
     scaling:

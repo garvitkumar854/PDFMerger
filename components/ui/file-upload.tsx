@@ -172,6 +172,7 @@ export function FileUpload({
   const currentStageIndexRef = useRef(0);
   const lastUpdateRef = useRef<number>(0);
   const progressHistoryRef = useRef<Array<{ time: number; progress: number }>>([]);
+  const stageProgressRef = useRef<{ [key: string]: number }>({});
 
   // Calculate overall progress based on stage weights and progress
   const calculateOverallProgress = useCallback((currentStageIndex: number, currentProgress: number) => {
@@ -191,10 +192,15 @@ export function FileUpload({
 
   // Update progress for current stage
   const updateStageProgress = useCallback((stageName: string, progress: number) => {
-    setStageProgress(prev => ({
-      ...prev,
-      [stageName]: progress
-    }));
+    setStageProgress(prev => {
+      const newStageProgress = {
+        ...prev,
+        [stageName]: progress
+      };
+      // Also update the ref to avoid dependency issues
+      stageProgressRef.current = newStageProgress;
+      return newStageProgress;
+    });
   }, []);
 
   // Calculate progress rate
@@ -260,7 +266,8 @@ export function FileUpload({
           onProgress?.(overallProgress);
         } else {
           // For non-auto stages, use the progress from stageProgress state
-          const currentProgress = stageProgress[currentStage.name] || 0;
+          // Use a ref to avoid dependency issues
+          const currentProgress = stageProgressRef.current[currentStage.name] || 0;
           
           if (currentProgress >= 100) {
             currentStageIndexRef.current++;
@@ -297,7 +304,7 @@ export function FileUpload({
         cancelAnimationFrame(animationFrame);
       }
     };
-  }, [isValidating, currentFileCount, onProgress, calculateOverallProgress, updateStageProgress, stageProgress]);
+  }, [isValidating, currentFileCount, onProgress, calculateOverallProgress, updateStageProgress]);
 
   // Update stage progress from external events
   const updateProgress = useCallback((stage: string, progress: number) => {
@@ -334,10 +341,15 @@ export function FileUpload({
     );
 
     // Update stage progress
-    setStageProgress(prev => ({
-      ...prev,
-      [stage]: adjustedProgress
-    }));
+    setStageProgress(prev => {
+      const newStageProgress = {
+        ...prev,
+        [stage]: adjustedProgress
+      };
+      // Also update the ref to avoid dependency issues
+      stageProgressRef.current = newStageProgress;
+      return newStageProgress;
+    });
 
     // Calculate overall progress with dynamic weighting
     const stages = Object.keys(STAGE_WEIGHTS);
