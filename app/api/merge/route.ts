@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PDFService } from '@/lib/services/pdf-service';
+import { ErrorHandler } from '@/lib/utils/error-handler';
+import { RequestValidator } from '@/lib/validation/request';
+import { rateLimiters, getRateLimitHeaders } from '@/lib/rate-limit';
 import { Readable } from 'stream';
 
 // Configure for maximum performance within Vercel hobby plan limits
@@ -20,6 +23,27 @@ export async function POST(request: NextRequest) {
     metrics.startTime = performance.now();
     console.log('[PDF Merge] Starting new merge request with ultra-performance settings');
     
+    // Rate limiting
+    const clientIP = request.headers.get('x-forwarded-for')?.split(',')[0] || 
+                    request.headers.get('x-real-ip') || 
+                    'unknown';
+    
+    try {
+      await rateLimiters.merge.check(clientIP);
+    } catch (error) {
+      const headers = getRateLimitHeaders({
+        success: false,
+        remaining: 0,
+        resetTime: Date.now() + 60000,
+        limit: 10
+      });
+      
+      return NextResponse.json(
+        { error: 'Rate limit exceeded. Please try again later.' },
+        { status: 429, headers }
+      );
+    }
+    
     const formData = await request.formData();
     const files = formData.getAll('files');
     
@@ -35,6 +59,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No files provided' }, { status: 400 });
     }
 
+    // Validate file count
+    if (fileCount > 20) {
+      return NextResponse.json({ error: 'Maximum 20 files allowed' }, { status: 400 });
+    }
+
     // Dynamic optimization based on client capabilities and request size
     const isLowEndDevice = deviceType === 'mobile' || clientMemory < 4096;
     const isLargeOperation = totalSize > 100 * 1024 * 1024 || fileCount > 20;
@@ -47,6 +76,16 @@ export async function POST(request: NextRequest) {
       }
       
       metrics.filesProcessed++;
+      
+      // Validate file type
+      if (file.type !== 'application/pdf') {
+        throw new Error(`File ${index + 1} is not a PDF`);
+      }
+
+      // Validate file size
+      if (file.size > 200 * 1024 * 1024) {
+        throw new Error(`File ${index + 1} exceeds 200MB limit`);
+      }
       
       // Enhanced streaming for large files
       if (file.size > 50 * 1024 * 1024) {
@@ -63,12 +102,14 @@ export async function POST(request: NextRequest) {
           metrics.bytesProcessed += value.length;
           
           // Monitor memory usage
-          const memUsage = process.memoryUsage().heapUsed / 1024 / 1024;
-          metrics.peakMemory = Math.max(metrics.peakMemory, memUsage);
-          
-          // Force GC if memory pressure is high
-          if (memUsage > 1024 && typeof global.gc === 'function') {
-            global.gc();
+          if (typeof process !== 'undefined') {
+            const memUsage = process.memoryUsage().heapUsed / 1024 / 1024;
+            metrics.peakMemory = Math.max(metrics.peakMemory, memUsage);
+            
+            // Force GC if memory pressure is high
+            if (memUsage > 1024 && typeof global.gc === 'function') {
+              global.gc();
+            }
           }
         }
         
@@ -108,6 +149,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Validate total size
+    const actualTotalSize = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+    if (actualTotalSize > 200 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Total file size exceeds 200MB limit' }, { status: 400 });
+    }
+
     // Get PDF service instance with ultra-optimized settings
     const pdfService = PDFService.getInstance();
     const result = await pdfService.processPDFs(buffers, {
@@ -118,7 +165,9 @@ export async function POST(request: NextRequest) {
       parseSpeed: isLowEndDevice ? 1000 : 5000,
       maxConcurrentOperations: isLowEndDevice ? 4 : isHighPriority ? 128 : 64,
       memoryLimit: isLowEndDevice ? 4096 : 16384,
-      chunkSize: isLowEndDevice ? 64 : 256
+      chunkSize: isLowEndDevice ? 64 : 256,
+      removeAnnotations: false,
+      optimizeImages: true
     });
 
     if (!result.success) {
@@ -164,11 +213,18 @@ export async function POST(request: NextRequest) {
       response.headers.set('X-Total-Pages', result.stats.totalPages.toString());
       response.headers.set('X-Total-Size', result.stats.totalSize.toString());
       response.headers.set('X-Processing-Time', result.stats.processingTime.toString());
-      response.headers.set('X-Compression-Ratio', (result.data!.length / totalSize).toFixed(2));
+      response.headers.set('X-Compression-Ratio', result.stats.compressionRatio.toFixed(2));
       response.headers.set('X-Peak-Memory', metrics.peakMemory.toFixed(2));
       response.headers.set('X-Files-Processed', metrics.filesProcessed.toString());
       response.headers.set('X-Total-Time', (performance.now() - metrics.startTime).toFixed(2));
     }
+    
+    // Add rate limit headers
+    const rateLimitResult = await rateLimiters.merge.check(clientIP);
+    const rateLimitHeaders = getRateLimitHeaders(rateLimitResult);
+    Object.entries(rateLimitHeaders).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
     
     // Optimized caching headers
     response.headers.set('Cache-Control', 'no-store, must-revalidate');
@@ -178,10 +234,17 @@ export async function POST(request: NextRequest) {
     return response;
 
   } catch (error) {
-    console.error('[PDF Merge] Error:', error);
+    const errorDetails = ErrorHandler.handle(error, {
+      component: 'MergeAPI',
+      action: 'POST',
+      timestamp: Date.now()
+    });
+
+    console.error('[PDF Merge] Error:', errorDetails);
+    
     return NextResponse.json(
       { 
-        error: error instanceof Error ? error.message : 'Failed to merge PDFs',
+        error: ErrorHandler.createUserMessage(error),
         metrics: {
           peakMemory: metrics.peakMemory.toFixed(2),
           filesProcessed: metrics.filesProcessed,

@@ -1,6 +1,7 @@
 import { PDFDocument, PDFPage, PDFName, PDFDict } from 'pdf-lib';
 import { createHash } from 'crypto';
 import { estimatePDFMemoryUsage } from '@/lib/utils/pdf-validation';
+import { ErrorHandler } from '@/lib/utils/error-handler';
 import pLimit from 'p-limit';
 
 // Optimized limits for maximum performance
@@ -48,6 +49,8 @@ interface MergeResult {
     totalPages: number;
     totalSize: number;
     processingTime: number;
+    memoryUsed: number;
+    compressionRatio: number;
   };
 }
 
@@ -74,6 +77,8 @@ interface ProcessingOptions {
   memoryLimit?: number;
   chunkSize?: number;
   parseSpeed?: number;
+  removeAnnotations?: boolean;
+  optimizeImages?: boolean;
 }
 
 interface StreamingOptions extends ProcessingOptions {
@@ -82,7 +87,7 @@ interface StreamingOptions extends ProcessingOptions {
 }
 
 export interface ProcessingProgress {
-  stage: 'initialization' | 'validation' | 'loading' | 'merging' | 'optimizing' | 'finalizing';
+  stage: 'initialization' | 'validation' | 'loading' | 'merging' | 'optimizing' | 'finalizing' | 'complete';
   progress: number;
   fileIndex: number;
   totalFiles: number;
@@ -96,6 +101,7 @@ export interface ProcessingProgress {
     estimatedTimeRemaining: number;
     currentStage: number;
     totalStages: number;
+    memoryUsage: number;
   };
 }
 
@@ -117,6 +123,7 @@ export class PDFService {
   private documentCache: Map<string, PDFDocument>;
   private lastLogTime = 0;
   private LOG_THROTTLE = 100; // Throttle logs to every 100ms
+  private memoryMonitor: NodeJS.Timeout | null;
 
   private constructor() {
     this.loadingPromises = new Map();
@@ -131,6 +138,10 @@ export class PDFService {
     this.totalPages = 0;
     this.pageCache = new Map();
     this.documentCache = new Map();
+    this.memoryMonitor = null;
+    
+    // Start memory monitoring
+    this.startMemoryMonitoring();
   }
 
   static getInstance(): PDFService {
@@ -140,6 +151,17 @@ export class PDFService {
     return PDFService.instance;
   }
 
+  private startMemoryMonitoring(): void {
+    if (typeof process !== 'undefined') {
+      this.memoryMonitor = setInterval(() => {
+        const memUsage = process.memoryUsage();
+        if (memUsage.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
+          this.cleanup(true);
+        }
+      }, 10000); // Check every 10 seconds
+    }
+  }
+
   private async initializeWorkerPool() {
     // Initialize worker pool for parallel processing if needed
     if (!this.workerPool) {
@@ -147,8 +169,10 @@ export class PDFService {
     }
   }
 
-  private async optimizePDF(doc: PDFDocument): Promise<void> {
+  private async optimizePDF(doc: PDFDocument, options: ProcessingOptions = {}): Promise<void> {
     try {
+      if (!options.optimizeOutput) return;
+
       const pages = doc.getPages();
       for (const page of pages) {
         try {
@@ -161,7 +185,17 @@ export class PDFService {
           const entries = xObject.entries();
           for (const [_, obj] of entries) {
             if (obj instanceof PDFDict && obj.lookup(PDFName.of('Subtype')) === PDFName.of('Image')) {
-              obj.set(PDFName.of('Interpolate'), PDFName.of('true'));
+              if (options.optimizeImages) {
+                obj.set(PDFName.of('Interpolate'), PDFName.of('true'));
+              }
+            }
+          }
+
+          // Remove annotations if requested
+          if (options.removeAnnotations) {
+            const annotations = page.node.lookup(PDFName.of('Annots'));
+            if (annotations) {
+              page.node.delete(PDFName.of('Annots'));
             }
           }
         } catch (error) {
@@ -171,7 +205,7 @@ export class PDFService {
       }
     } catch (error) {
       // Continue without optimization if there's an error
-      console.warn('Image optimization skipped:', error);
+      console.warn('PDF optimization skipped:', error);
     }
   }
 
@@ -190,43 +224,44 @@ export class PDFService {
   }
 
   private async checkMemoryLimit(): Promise<void> {
-    const currentMemory = process.memoryUsage();
-    if (currentMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
-      await this.cleanup();
-      
-      const newMemory = process.memoryUsage();
-      if (newMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
-        throw new Error('Memory limit reached. Please try with fewer pages.');
+    if (typeof process !== 'undefined') {
+      const currentMemory = process.memoryUsage();
+      if (currentMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
+        await this.cleanup();
+        
+        const newMemory = process.memoryUsage();
+        if (newMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
+          throw new Error('Memory limit reached. Please try with fewer pages.');
+        }
       }
     }
   }
 
-  /**
-   * Clean up resources and force garbage collection if needed
-   * @param force Whether to force garbage collection
-   */
   public async cleanup(force: boolean = false): Promise<void> {
     try {
-      // Clear document cache if it's too large
-      if (this.documentCache.size > LIMITS.MAX_CACHE_ENTRIES) {
-        this.documentCache.clear();
-      }
+      // Clear caches
+      this.loadingPromises.clear();
+      this.pageCache.clear();
+      this.documentCache.clear();
       
-      // Clear page cache if it's too large
-      if (this.pageCache.size > LIMITS.MAX_CACHE_ENTRIES) {
-        this.pageCache.clear();
+      // Clear WeakMap caches
+      validationCache = new WeakMap();
+      metadataCache = new WeakMap();
+      pageCache = new WeakMap();
+
+      // Reset counters
+      this.processedBytes = 0;
+      this.processedPages = 0;
+      this.operationCount = 0;
+
+      // Force garbage collection if available
+      if (typeof global.gc === 'function' && force) {
+        global.gc();
       }
-      
-      // Force garbage collection if memory pressure is high
-      const memUsage = process.memoryUsage().heapUsed / 1024 / 1024;
-      if (force || memUsage > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
-        if (typeof global.gc === 'function') {
-          global.gc();
-          await new Promise(resolve => setTimeout(resolve, 1));
-        }
-      }
+
+      this.logWithThrottle('Memory cleanup completed');
     } catch (error) {
-      console.warn('[PDF Merge] Cleanup error:', error);
+      ErrorHandler.handle(error, { component: 'PDFService', action: 'cleanup' });
     }
   }
 
@@ -236,44 +271,33 @@ export class PDFService {
     pageIndex: number
   ): Promise<void> {
     try {
-      const [page] = await mergedPdf.copyPages(doc, [pageIndex]);
-      mergedPdf.addPage(page);
-      
-      this.operationCount++;
-      if (this.operationCount % PROCESSING.CLEANUP_INTERVAL === 0) {
-        await this.checkMemoryLimit();
+      const pages = doc.getPages();
+      if (pageIndex < pages.length) {
+        const [copiedPage] = await mergedPdf.copyPages(doc, [pageIndex]);
+        mergedPdf.addPage(copiedPage);
+        this.processedPages++;
       }
     } catch (error) {
-      console.warn(`Error processing page ${pageIndex}:`, error);
+      ErrorHandler.handle(error, { component: 'PDFService', action: 'processPage' });
+      throw error;
     }
   }
 
   private logWithThrottle(message: string) {
-    const now = performance.now();
-    if (now - this.lastLogTime >= this.LOG_THROTTLE) {
-      console.log(message);
+    const now = Date.now();
+    if (now - this.lastLogTime > this.LOG_THROTTLE) {
+      console.log(`[PDFService] ${message}`);
       this.lastLogTime = now;
     }
   }
 
   private resetProgress() {
-    this.startTime = Date.now();
-    this.lastProgressUpdate = this.startTime;
+    this.startTime = performance.now();
+    this.lastProgressUpdate = 0;
     this.processedBytes = 0;
     this.totalBytes = 0;
     this.processedPages = 0;
     this.totalPages = 0;
-    this.lastLogTime = 0;
-    
-    // Clear any hanging operations
-    this.loadingPromises.clear();
-    this.pageCache.clear();
-    this.documentCache.clear();
-    
-    // Force garbage collection
-    if (typeof global.gc === 'function') {
-      global.gc();
-    }
   }
 
   private updateProgress(
@@ -283,66 +307,17 @@ export class PDFService {
     totalFiles: number,
     onProgress?: ProgressCallback
   ) {
-    const now = Date.now();
+    const now = performance.now();
     const timeElapsed = now - this.startTime;
-
-    // Define specific progress stages
-    const progressStages = {
-      initialization: [0, 10],
-      validation: [10, 25],
-      loading: [25, 45],
-      merging: [45, 75],
-      optimizing: [75, 95],
-      finalizing: [95, 100]
-    };
-
-    // Get the current stage range
-    const [stageStart, stageEnd] = progressStages[stage];
     
-    // Calculate progress within the current stage
-    const stageProgress = Math.min(100, progress);
-    const stageRange = stageEnd - stageStart;
-    const actualProgress = stageStart + (stageRange * (stageProgress / 100));
-
-    // Define specific progress points we want to hit
-    const targetPoints = [10, 25, 30, 45, 58, 69, 75, 89, 95, 99, 100];
+    // Throttle progress updates to prevent excessive calls
+    if (now - this.lastProgressUpdate < 100) return;
     
-    // Find the next target point
-    let overallProgress = actualProgress;
-    for (const point of targetPoints) {
-      if (actualProgress <= point) {
-        // Snap to the nearest target point if we're close
-        if (point - actualProgress < 2) {
-          overallProgress = point;
-        }
-        break;
-      }
-    }
-
-    // Ensure progress never goes backwards
-    if (this.lastProgressUpdate > overallProgress) {
-      overallProgress = this.lastProgressUpdate;
-    }
-
-    // Update last progress
-    this.lastProgressUpdate = overallProgress;
-
-    // Calculate estimated time remaining
-    const estimatedTimeRemaining = overallProgress > 0 
-      ? (timeElapsed / overallProgress) * (100 - overallProgress)
-      : 0;
-
-    // Log progress without throttling for immediate feedback
-    console.log(
-      `[PDF Merge] ${stage.charAt(0).toUpperCase() + stage.slice(1)} - ` +
-      `${overallProgress.toFixed(1)}% complete. File ${fileIndex + 1}/${totalFiles}. ` +
-      `Pages: ${this.processedPages}/${this.totalPages}. ` +
-      `Time: ${(timeElapsed / 1000).toFixed(1)}s`
-    );
-
-    onProgress?.({
+    this.lastProgressUpdate = now;
+    
+    const progressData: ProcessingProgress = {
       stage,
-      progress: overallProgress,
+      progress: Math.min(100, Math.max(0, progress)),
       fileIndex,
       totalFiles,
       details: {
@@ -352,11 +327,25 @@ export class PDFService {
         bytesProcessed: this.processedBytes,
         totalBytes: this.totalBytes,
         timeElapsed,
-        estimatedTimeRemaining,
-        currentStage: targetPoints.findIndex(p => p > overallProgress),
-        totalStages: targetPoints.length
+        estimatedTimeRemaining: this.calculateETA(timeElapsed, progress),
+        currentStage: this.getStageNumber(stage),
+        totalStages: 6,
+        memoryUsage: typeof process !== 'undefined' ? process.memoryUsage().heapUsed / 1024 / 1024 : 0
       }
-    });
+    };
+
+    onProgress?.(progressData);
+  }
+
+  private calculateETA(timeElapsed: number, progress: number): number {
+    if (progress <= 0) return 0;
+    const rate = progress / timeElapsed;
+    return (100 - progress) / rate;
+  }
+
+  private getStageNumber(stage: ProcessingProgress['stage']): number {
+    const stages = ['initialization', 'validation', 'loading', 'merging', 'optimizing', 'finalizing'];
+    return stages.indexOf(stage) + 1;
   }
 
   async processPDFs(
@@ -364,178 +353,130 @@ export class PDFService {
     options: ProcessingOptions = {},
     onProgress?: ProgressCallback
   ): Promise<MergeResult> {
-    this.resetProgress();
     const startTime = performance.now();
-    
-    // Start with initialization stage
-    this.updateProgress('initialization', 0, 0, buffers.length, onProgress);
+    let mergedPdf: PDFDocument | null = null;
+    let totalSize = 0;
+    let totalPages = 0;
 
     try {
-      // Calculate total bytes and validate in parallel
-      this.totalBytes = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
-      const isSmallOperation = this.totalBytes < LIMITS.SMALL_FILE_THRESHOLD;
-      const isLargeOperation = this.totalBytes > LIMITS.LARGE_FILE_THRESHOLD;
+      this.resetProgress();
+      this.operationCount++;
+
+      // Calculate totals
+      for (const buffer of buffers) {
+        totalSize += buffer.byteLength;
+      }
+
+      this.totalBytes = totalSize;
+      this.updateProgress('initialization', 5, 0, buffers.length, onProgress);
+
+      // Validate all files first
+      this.updateProgress('validation', 10, 0, buffers.length, onProgress);
+      for (let i = 0; i < buffers.length; i++) {
+        const stats = await this.validatePDFLimits(buffers[i]);
+        totalPages += stats.pageCount;
+        this.updateProgress('validation', 10 + (i / buffers.length) * 5, i, buffers.length, onProgress);
+      }
+
+      this.totalPages = totalPages;
+      this.updateProgress('loading', 20, 0, buffers.length, onProgress);
+
+      // Create merged PDF
+      mergedPdf = await PDFDocument.create();
       
-      this.updateProgress('initialization', 100, 0, buffers.length, onProgress);
+      // Process files in optimized batches
+      const batchSize = options.maxConcurrentOperations || PROCESSING.MAX_CONCURRENT_OPERATIONS;
+      const limit = pLimit(batchSize);
 
-      // Initial validation
-      if (!buffers.length) return { success: false, error: 'No PDFs provided' };
-      if (buffers.length > LIMITS.MAX_FILES) {
-        return { success: false, error: `Maximum ${LIMITS.MAX_FILES} PDFs allowed per merge` };
-      }
-      if (this.totalBytes > LIMITS.MAX_TOTAL_SIZE) {
-        return { success: false, error: `Total size exceeds ${LIMITS.MAX_TOTAL_SIZE / (1024 * 1024)}MB limit` };
-      }
-
-      // Create output document with optimized settings
-      const mergedPdf = await PDFDocument.create({
-        updateMetadata: false
-      });
-
-      // Process PDFs in optimized parallel batches
-      const batchSize = isSmallOperation ? 
-        PROCESSING.SMALL_FILE_BATCH_SIZE : 
-        isLargeOperation ? 
-          PROCESSING.LARGE_FILE_BATCH_SIZE : 
-          PROCESSING.BATCH_SIZE;
-
-      const batches = this.chunkArray(buffers, batchSize);
-      const results: { doc: PDFDocument; pageCount: number; hash: string }[] = [];
-
-      // Process all batches with validation progress
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-        const batch = batches[batchIndex];
-        const validationProgress = (batchIndex / batches.length) * 100;
-        this.updateProgress('validation', validationProgress, batchIndex, batches.length, onProgress);
-
+      for (let i = 0; i < buffers.length; i++) {
+        const buffer = buffers[i];
+        this.processedBytes += buffer.byteLength;
+        
         try {
-          const batchPromises = batch.map(async (buffer, index) => {
-            const globalIndex = batchIndex * batchSize + index;
-            try {
-              if (buffer.byteLength > LIMITS.MAX_FILE_SIZE) {
-                throw new Error(`File ${globalIndex + 1} exceeds size limit`);
-              }
-
-              const hash = await this.hashBuffer(buffer);
-              let doc: PDFDocument;
-
-              if (this.documentCache.has(hash)) {
-                doc = this.documentCache.get(hash)!;
-              } else {
-                doc = await PDFDocument.load(buffer, {
-                  updateMetadata: false,
-                  ignoreEncryption: true,
-                  throwOnInvalidObject: false,
-                  parseSpeed: isSmallOperation ? 
-                    PROCESSING.PARSE_SPEED / 2 : 
-                    PROCESSING.PARSE_SPEED,
-                  capNumbers: true
-                });
-                this.documentCache.set(hash, doc);
-              }
-
-              const pageCount = doc.getPageCount();
-              this.processedBytes += buffer.byteLength;
-              this.totalPages += pageCount;
-
-              return { doc, pageCount, hash };
-            } catch (error) {
-              console.warn(`[PDF Merge] Error processing file ${globalIndex + 1}:`, error);
-              return null;
-            }
+          const doc = await PDFDocument.load(buffer, {
+            updateMetadata: false,
+            ignoreEncryption: true,
+            parseSpeed: options.parseSpeed || PROCESSING.PARSE_SPEED
           });
 
-          const batchResults = await Promise.all(batchPromises);
-          results.push(...batchResults.filter((result): result is NonNullable<typeof result> => result !== null));
-
-          // Update loading progress to hit specific percentages
-          const loadingProgress = Math.min(100, (batchIndex / batches.length) * 100);
-          this.updateProgress('loading', loadingProgress, batchIndex, batches.length, onProgress);
-
-          if (isLargeOperation && batchIndex % 2 === 1) {
-            await this.cleanup();
-          }
-        } catch (error) {
-          console.warn('[PDF Merge] Batch processing error:', error);
-        }
-      }
-
-      if (results.length === 0) {
-        return { success: false, error: 'No valid PDFs to process' };
-      }
-
-      // Process files with merging progress
-      let processedPages = 0;
-      const totalPages = results.reduce((sum, r) => sum + r.pageCount, 0);
-      
-      for (let fileIndex = 0; fileIndex < results.length; fileIndex++) {
-        const { doc, pageCount } = results[fileIndex];
-        
-        const interval = isSmallOperation ? 
-          Math.min(pageCount, PROCESSING.PAGE_INTERVAL / 2) : 
-          PROCESSING.PAGE_INTERVAL;
-        
-        const pageChunks = this.chunkArray(
-          Array.from({ length: pageCount }, (_, i) => i),
-          interval
-        );
-
-        for (let chunkIndex = 0; chunkIndex < pageChunks.length; chunkIndex++) {
-          const chunk = pageChunks[chunkIndex];
-          await this.processChunk(chunk, doc, mergedPdf);
-          processedPages += chunk.length;
+          const pageIndices = doc.getPageIndices();
+          const copiedPages = await mergedPdf.copyPages(doc, pageIndices);
           
-          // Calculate merging progress to hit specific percentages
-          const mergingProgress = Math.min(100, (processedPages / totalPages) * 100);
-          this.updateProgress('merging', mergingProgress, fileIndex, results.length, onProgress);
-        }
+          for (const page of copiedPages) {
+            mergedPdf.addPage(page);
+            this.processedPages++;
+          }
 
-        this.documentCache.delete(results[fileIndex].hash);
-        if (pageCount > 1000 || isLargeOperation) {
-          await this.cleanup();
+          // Update progress
+          const progress = 20 + (i / buffers.length) * 60;
+          this.updateProgress('merging', progress, i, buffers.length, onProgress);
+
+          // Memory management
+          if (i % 5 === 0) {
+            await this.checkMemoryLimit();
+          }
+
+        } catch (error) {
+          ErrorHandler.handle(error, { 
+            component: 'PDFService', 
+            action: 'processPDFs',
+            userId: `file_${i}`
+          });
+          throw new Error(`Failed to process file ${i + 1}: ${ErrorHandler.getErrorMessage(error)}`);
         }
       }
 
-      // Final optimization phase with specific progress points
-      this.updateProgress('optimizing', 0, buffers.length, buffers.length, onProgress);
+      this.updateProgress('optimizing', 85, buffers.length - 1, buffers.length, onProgress);
+
+      // Optimize the merged PDF
+      await this.optimizePDF(mergedPdf, options);
+
+      this.updateProgress('finalizing', 95, buffers.length - 1, buffers.length, onProgress);
+
+      // Save the merged PDF
+      const saveOptions: any = {};
+      if (options.compressionLevel) {
+        saveOptions.useObjectStreams = true;
+        saveOptions.addDefaultPage = false;
+      }
+
+      const mergedPdfBytes = await mergedPdf.save(saveOptions);
       
-      const mergedPdfBytes = await mergedPdf.save({
-        useObjectStreams: !isLargeOperation,
-        addDefaultPage: false,
-        objectsPerTick: isSmallOperation ? 5000 : 2000
-      });
+      this.updateProgress('complete', 100, buffers.length - 1, buffers.length, onProgress);
 
-      this.updateProgress('optimizing', 100, buffers.length, buffers.length, onProgress);
-
-      // Final cleanup and progress
-      this.updateProgress('finalizing', 0, buffers.length, buffers.length, onProgress);
-      this.pageCache.clear();
-      this.documentCache.clear();
-      await this.cleanup(true);
-      this.updateProgress('finalizing', 100, buffers.length, buffers.length, onProgress);
-
-      const totalTime = performance.now() - startTime;
+      const processingTime = performance.now() - startTime;
+      const compressionRatio = mergedPdfBytes.length / totalSize;
+      const memoryUsed = typeof process !== 'undefined' ? process.memoryUsage().heapUsed / 1024 / 1024 : 0;
 
       return {
         success: true,
         data: mergedPdfBytes,
         stats: {
-          totalPages: this.totalPages,
-          totalSize: this.totalBytes,
-          processingTime: totalTime
+          totalPages,
+          totalSize,
+          processingTime,
+          memoryUsed,
+          compressionRatio
         }
       };
 
     } catch (error) {
-      console.error('[PDF Merge] Error:', error);
-      this.pageCache.clear();
-      this.documentCache.clear();
-      await this.cleanup(true);
+      const errorDetails = ErrorHandler.handle(error, { 
+        component: 'PDFService', 
+        action: 'processPDFs' 
+      });
       
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'PDF processing failed'
+        error: ErrorHandler.createUserMessage(error)
       };
+    } finally {
+      this.operationCount--;
+      
+      // Cleanup if no operations are running
+      if (this.operationCount === 0) {
+        setTimeout(() => this.cleanup(), 5000);
+      }
     }
   }
 
@@ -548,240 +489,92 @@ export class PDFService {
   }
 
   private async processChunk(chunk: number[], doc: PDFDocument, mergedPdf: PDFDocument): Promise<void> {
-    try {
-      const cacheKey = `${doc.getTitle() || ''}-${chunk[0]}-${chunk[chunk.length - 1]}`;
-      
-      // Optimize chunk size based on document size
-      const docSize = doc.getPages().length;
-      const isSmallDoc = docSize <= 100;
-      const subChunkSize = isSmallDoc ? 
-        Math.min(docSize, PROCESSING.SUB_BATCH_SIZE / 2) : 
-        PROCESSING.SUB_BATCH_SIZE;
-      
-      // Process in parallel sub-chunks for maximum performance
-      const subChunks = this.chunkArray(chunk, subChunkSize);
-      
-      // Enhanced parallel processing with adaptive worker pool
-      const workerCount = Math.min(
-        PROCESSING.WORKER_THREADS,
-        isSmallDoc ? 32 : Math.ceil(chunk.length / 500)
-      );
-      
-      const subChunkLimit = pLimit(workerCount);
-      const processedPages = new Set<number>();
-      
-      // Pre-allocate page arrays for better memory efficiency
-      const pageArrays: PDFPage[][] = new Array(subChunks.length);
-      
-      // Process all sub-chunks in parallel
-      await Promise.all(
-        subChunks.map((subChunk, index) => 
-          subChunkLimit(async () => {
-            try {
-              // Optimize memory by processing pages in dynamic groups
-              const pageGroupSize = Math.min(
-                isSmallDoc ? 25 : 100,
-                Math.ceil(subChunk.length / workerCount)
-              );
-              
-              const pageGroups = this.chunkArray(subChunk, pageGroupSize);
-              const pagesForChunk: PDFPage[] = [];
-              
-              for (const group of pageGroups) {
-                // Skip already processed pages
-                const unprocessedPages = group.filter(p => !processedPages.has(p));
-                if (unprocessedPages.length === 0) continue;
-                
-                // Copy pages in bulk for better performance
-                const pages = await mergedPdf.copyPages(doc, unprocessedPages);
-                pagesForChunk.push(...pages);
-                
-                // Mark pages as processed
-                unprocessedPages.forEach(p => processedPages.add(p));
-              }
-              
-              // Store pages for bulk addition
-              pageArrays[index] = pagesForChunk;
-              
-              // Check memory pressure
-              const memUsage = process.memoryUsage().heapUsed / 1024 / 1024;
-              if (memUsage > LIMITS.MEMORY * 0.85) {
-                await this.cleanup();
-                await new Promise(resolve => setTimeout(resolve, 1));
-              }
-            } catch (e) {
-              console.warn(
-                `[PDF Merge] Warning: Error in sub-chunk ${subChunk[0]}-${subChunk[subChunk.length - 1]}: ${e}`
-              );
-            }
-          })
-        )
-      );
-      
-      // Add all pages in bulk for better performance
-      const addPageLimit = pLimit(16);
-      await Promise.all(
-        pageArrays.map(pages =>
-          addPageLimit(async () => {
-            if (!pages || pages.length === 0) return;
-            
-            // Add pages in bulk
-            pages.forEach(page => {
-              mergedPdf.addPage(page);
-              // Clear page references immediately
-              (page as any)._dict = null;
-              (page as any)._ref = null;
-            });
-            
-            // Clear references
-            pages.length = 0;
-          })
-        )
-      );
-      
-      // Clear cache entry
-      this.pageCache.delete(cacheKey);
-      
-    } catch (error) {
-      console.warn('[PDF Merge] Error in chunk processing:', error);
-      
-      // Enhanced fallback with optimized parallel processing
-      const fallbackLimit = pLimit(32);
-      const pageGroups = this.chunkArray(chunk, 50);
-      
-      await Promise.all(
-        pageGroups.map(group => 
-          fallbackLimit(async () => {
-            const pages: PDFPage[] = [];
-            
-            for (const pageIndex of group) {
-              try {
-                const [page] = await mergedPdf.copyPages(doc, [pageIndex]);
-                pages.push(page);
-              } catch (e) {
-                console.warn(`[PDF Merge] Warning: Skipping problematic page ${pageIndex}`);
-              }
-            }
-            
-            // Add pages in bulk
-            pages.forEach(page => {
-              mergedPdf.addPage(page);
-              // Clear page references
-              (page as any)._dict = null;
-              (page as any)._ref = null;
-            });
-            
-            // Clear references
-            pages.length = 0;
-            
-            // Check memory pressure in fallback mode
-            const memUsage = process.memoryUsage().heapUsed / 1024 / 1024;
-            if (memUsage > LIMITS.MEMORY * 0.9) {
-              await this.cleanup();
-              await new Promise(resolve => setTimeout(resolve, 1));
-            }
-          })
-        )
-      );
-    }
+    const limit = pLimit(PROCESSING.MAX_CONCURRENT_OPERATIONS);
+    const promises = chunk.map(pageIndex => 
+      limit(() => this.processPage(doc, mergedPdf, pageIndex))
+    );
+    await Promise.all(promises);
   }
 
-  /**
-   * Advanced PDF validation with caching and quick checks
-   */
   async validatePDF(buffer: ArrayBuffer): Promise<{ isValid: boolean; error?: string; metadata?: PDFMetadata }> {
     try {
       // Check cache first
       if (validationCache.has(buffer)) {
-        return { isValid: validationCache.get(buffer)!, metadata: metadataCache.get(buffer) };
+        const isValid = validationCache.get(buffer)!;
+        if (isValid && metadataCache.has(buffer)) {
+          return { 
+            isValid: true, 
+            metadata: metadataCache.get(buffer)! 
+          };
+        }
+        return { isValid: false, error: 'Invalid PDF' };
       }
 
-      // Quick size validation
-      if (buffer.byteLength < 67) {
-        return { isValid: false, error: 'Invalid PDF: File too small' };
-      }
-
-      // Fast header check using TypedArray
-      const headerView = new Uint8Array(buffer.slice(0, 8));
-      if (!(headerView[0] === 0x25 && // %
-            headerView[1] === 0x50 && // P
-            headerView[2] === 0x44 && // D
-            headerView[3] === 0x46 && // F
-            headerView[4] === 0x2D)) { // -
-        return { isValid: false, error: 'Invalid PDF: Wrong signature' };
-      }
-
-      // Version check
-      const version = String.fromCharCode(headerView[5], headerView[6], headerView[7]);
-      if (!version.match(/[0-9]\.[0-9]/)) {
-        return { isValid: false, error: 'Invalid PDF: Unsupported version' };
-      }
-
-      // Load PDF with optimized settings
-      const pdfDoc = await PDFDocument.load(buffer, {
+      const doc = await PDFDocument.load(buffer, {
         updateMetadata: false,
         ignoreEncryption: true,
-        throwOnInvalidObject: true,
-        parseSpeed: 1000,
-        capNumbers: true
+        parseSpeed: PROCESSING.PARSE_SPEED
       });
 
-      // Check for encrypted content
-      if (pdfDoc.isEncrypted) {
-        return { isValid: false, error: 'Invalid PDF: File is encrypted' };
-      }
-
-      // Check for minimum content
-      if (pdfDoc.getPageCount() === 0) {
-        return { isValid: false, error: 'Invalid PDF: No pages found' };
+      const pageCount = doc.getPageCount();
+      if (pageCount === 0) {
+        validationCache.set(buffer, false);
+        return { isValid: false, error: 'PDF has no pages' };
       }
 
       const metadata: PDFMetadata = {
-        pageCount: pdfDoc.getPageCount(),
-        isEncrypted: pdfDoc.isEncrypted,
-        version: pdfDoc.getProducer() || 'Unknown',
+        pageCount,
+        isEncrypted: doc.isEncrypted,
+        version: '1.7', // Default PDF version
         fileSize: buffer.byteLength,
-        hasXFA: this.checkForXFA(pdfDoc)
+        hasXFA: this.checkForXFA(doc)
       };
 
-      // Cache the results
+      // Cache results
       validationCache.set(buffer, true);
       metadataCache.set(buffer, metadata);
 
       return { isValid: true, metadata };
+
     } catch (error) {
-      console.error('PDF validation error:', error);
-      return {
-        isValid: false,
-        error: error instanceof Error ? 
-          `Invalid PDF: ${error.message}` : 
-          'PDF validation failed'
+      validationCache.set(buffer, false);
+      return { 
+        isValid: false, 
+        error: ErrorHandler.getErrorMessage(error)
       };
     }
   }
 
-  /**
-   * Check for XFA forms (which can cause issues)
-   */
   private checkForXFA(doc: PDFDocument): boolean {
     try {
       const catalog = doc.context.lookup(doc.context.trailerInfo.Root);
-      if (!(catalog instanceof PDFDict)) return false;
-
-      const acroForm = catalog.lookup(PDFName.of('AcroForm'));
-      if (!(acroForm instanceof PDFDict)) return false;
-
-      return acroForm.has(PDFName.of('XFA'));
+      if (catalog instanceof PDFDict) {
+        const acroForm = catalog.lookup(PDFName.of('AcroForm'));
+        if (acroForm && acroForm instanceof PDFDict) {
+          const xfa = acroForm.lookup(PDFName.of('XFA'));
+          return xfa !== undefined;
+        }
+      }
+      return false;
     } catch {
       return false;
     }
   }
 
   private async hashBuffer(buffer: ArrayBuffer): Promise<string> {
-    const data = new Uint8Array(buffer);
-    const hashBuffer = await crypto.subtle.digest('SHA-1', data);
-    return Array.from(new Uint8Array(hashBuffer))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
+    const hash = createHash('sha256');
+    hash.update(Buffer.from(buffer));
+    return hash.digest('hex');
+  }
+
+  // Cleanup on service destruction
+  destroy(): void {
+    if (this.memoryMonitor) {
+      clearInterval(this.memoryMonitor);
+    }
+    if (this.processingTimer) {
+      clearTimeout(this.processingTimer);
+    }
+    this.cleanup(true);
   }
 }

@@ -2,17 +2,13 @@ import { NextResponse } from "next/server";
 import { Resend } from "resend";
 import { contactFormSchema } from "@/lib/schemas/contact";
 import { ErrorResponse as EmailError } from "resend";
-import { rateLimit } from "@/lib/rate-limit";
+import { rateLimiters, getRateLimitHeaders } from "@/lib/rate-limit";
+import { ErrorHandler } from "@/lib/utils/error-handler";
+import { RequestValidator } from "@/lib/validation/request";
 import { headers } from "next/headers";
 import { z } from "zod";
 
 const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-
-const limiter = rateLimit({
-  interval: 60 * 1000, // 1 minute
-  uniqueTokenPerInterval: 500,
-  maxRequests: 5
-});
 
 const EmailDataSchema = z.object({
   from: z.string().min(1),
@@ -96,28 +92,27 @@ function sanitizeInput(input: string): string {
 
 export async function POST(request: Request): Promise<NextResponse<ApiResponse>> {
   try {
+    // Rate limiting
+    const clientIP = request.headers.get('x-forwarded-for')?.split(',')[0] || 
+                    request.headers.get('x-real-ip') || 
+                    'unknown';
+    
     try {
-      await limiter.check();
+      await rateLimiters.contact.check(clientIP);
     } catch (error) {
-      if (error instanceof Error && error.name === 'RateLimitError') {
-        const headers = {
-          'Retry-After': '60',
-          'X-RateLimit-Limit': '5',
-          'X-RateLimit-Remaining': '0',
-          'X-RateLimit-Reset': new Date(Date.now() + 60000).toISOString()
-        };
-        return NextResponse.json(
-          { error: "Too many requests. Please try again later." },
-          { status: 429, headers }
-        );
-      }
+      const headers = getRateLimitHeaders({
+        success: false,
+        remaining: 0,
+        resetTime: Date.now() + 60000,
+        limit: 5
+      });
       
-      console.error("Rate limit error:", error);
       return NextResponse.json(
-        { error: "Rate limit configuration error" },
-        { status: 500 }
+        { error: 'Too many requests. Please try again later.' },
+        { status: 429, headers }
       );
     }
+
     // Check for API key
     if (!process.env.RESEND_API_KEY) {
       console.error("Missing RESEND_API_KEY environment variable");
@@ -143,26 +138,27 @@ export async function POST(request: Request): Promise<NextResponse<ApiResponse>>
     try {
       body = await request.json();
     } catch (error) {
-      console.error("Failed to parse request body:", error);
+      const errorDetails = ErrorHandler.handle(error, {
+        component: 'ContactAPI',
+        action: 'parseBody'
+      });
+      
       return NextResponse.json(
         { error: "Invalid request body" },
         { status: 400 }
       );
     }
 
-    // Validate the request body
-    let validatedData;
-    try {
-      validatedData = contactFormSchema.parse(body);
-    } catch (error) {
-      console.error("Validation error:", error);
+    // Validate the request body using the new validator
+    const validation = RequestValidator.validateContactForm(body);
+    if (!validation.success) {
       return NextResponse.json(
-        { error: "Invalid form data" },
+        { error: validation.error },
         { status: 400 }
       );
     }
 
-    const { name, email, subject, message } = validatedData;
+    const { name, email, subject, message } = validation.data;
     
     if (!emailRegex.test(email)) {
       return NextResponse.json(
@@ -208,64 +204,73 @@ export async function POST(request: Request): Promise<NextResponse<ApiResponse>>
                   <p style="margin: 0 0 10px;"><strong>Message:</strong></p>
                   <p style="white-space: pre-wrap; margin: 0;">${sanitizedMessage}</p>
                 </div>
+                <hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
+                <p style="font-size: 12px; color: #666;">
+                  Sent from PDFMerger contact form<br>
+                  IP: ${clientIP}<br>
+                  Time: ${new Date().toISOString()}
+                </p>
               </div>
             </body>
           </html>
         `
       });
 
-      const remaining = await limiter.remaining();
-      const headers = {
-        "X-RateLimit-Limit": "5",
-        "X-RateLimit-Remaining": remaining.toString(),
-        "X-RateLimit-Reset": new Date(Date.now() + 60000).toISOString()
-      };
+      // Get rate limit info for response headers
+      const rateLimitResult = await rateLimiters.contact.check(clientIP);
+      const rateLimitHeaders = getRateLimitHeaders(rateLimitResult);
 
-      return NextResponse.json(
+      const response = NextResponse.json(
         { success: true, id: result.id },
-        { status: 200, headers }
+        { status: 200, headers: rateLimitHeaders }
       );
+
+      return response;
+
     } catch (error) {
-      console.error('Error sending email:', error);
+      const errorDetails = ErrorHandler.handle(error, {
+        component: 'ContactAPI',
+        action: 'sendEmail',
+        userId: email
+      });
+      
       const { code, message } = getErrorDetails(error);
       return NextResponse.json({ error: message }, { status: code });
     }
   } catch (error) {
-    console.error("Unexpected error:", error);
+    const errorDetails = ErrorHandler.handle(error, {
+      component: 'ContactAPI',
+      action: 'POST'
+    });
+    
     return NextResponse.json(
-      { error: "An unexpected error occurred" },
+      { error: ErrorHandler.createUserMessage(error) },
       { status: 500 }
     );
   }
 }
 
 function getErrorDetails(error: unknown): ErrorDetail {
-  if (error instanceof z.ZodError) {
-    return { 
-      code: 400, 
-      message: `Validation error: ${error.errors.map(e => e.message).join(', ')}` 
-    };
-  }
-
   if (isResendError(error)) {
     switch (error.statusCode) {
-      case 429:
-        return { code: 429, message: "Too many requests. Please try again later." };
-      case 401:
-        return { code: 401, message: "Invalid API key" };
       case 400:
-        return { code: 400, message: "Invalid email configuration" };
+        return { code: 400, message: 'Invalid email data' };
+      case 401:
+        return { code: 500, message: 'Email service authentication failed' };
+      case 403:
+        return { code: 500, message: 'Email service access denied' };
+      case 429:
+        return { code: 429, message: 'Email service rate limit exceeded' };
+      case 500:
+        return { code: 500, message: 'Email service temporarily unavailable' };
       default:
-        if (error.message.includes("Invalid email")) {
-          return { code: 400, message: error.message };
-        }
-        return { code: 500, message: "Email service error" };
+        return { code: 500, message: 'Email service error' };
     }
   }
-
+  
   if (error instanceof Error) {
-    return { code: 400, message: error.message };
+    return { code: 500, message: error.message };
   }
-
-  return { code: 500, message: "An unexpected error occurred" };
+  
+  return { code: 500, message: 'Unknown error occurred' };
 }
