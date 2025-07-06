@@ -7,7 +7,8 @@ interface ExtendedPerformance extends Performance {
   };
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Use relative path for deployed app - this fixes the JSON parsing error
+const API_URL = '';
 
 export async function mergePDFs(files: File[]) {
   try {

@@ -37,9 +37,9 @@ import { css } from "@emotion/react";
 import React from "react";
 import { PDFDocument } from "pdf-lib";
 
-// Constants must match server-side limits
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB per file
-const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB total
+// Constants must match server-side limits (production-optimized)
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB per file (production-optimized)
+const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total (production-optimized)
 const MAX_FILES = 20;
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY = 1000; // 1 second

@@ -1,6 +1,7 @@
 import { ProcessingProgress } from './pdf-service';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+// Use relative path for deployed app - this fixes the JSON parsing error
+const API_URL = '';
 
 export class APIService {
   static async mergePDFs(

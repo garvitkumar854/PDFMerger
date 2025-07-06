@@ -8,11 +8,17 @@ import { cn } from '@/lib/utils';
 import { ProgressAnimation } from './progress-animation';
 import { ProcessingProgress } from '@/lib/services/pdf-service';
 
-// Add these constants at the top level to match the server limits
-const LIMITS = {
-  MAX_TOTAL_SIZE: 100 * 1024 * 1024,  // 100MB total limit
-  MAX_FILE_SIZE: 50 * 1024 * 1024,    // 50MB per file
-  MAX_FILES: 20                        // Max 20 files
+const DEFAULT_CONFIG = {
+  MAX_FILES: 20,
+  MAX_FILE_SIZE: 25 * 1024 * 1024,    // 25MB per file (production-optimized)
+  MAX_TOTAL_SIZE: 50 * 1024 * 1024,   // 50MB total (production-optimized)
+  ALLOWED_TYPES: ['application/pdf'],
+  CHUNK_SIZE: 2 * 1024 * 1024,        // 2MB chunks
+  PARALLEL_UPLOADS: 3,
+  RETRY_ATTEMPTS: 3,
+  RETRY_DELAY: 1000,
+  UPLOAD_TIMEOUT: 60000,              // 60 seconds
+  PROCESSING_TIMEOUT: 90000,          // 90 seconds
 };
 
 // Helper function to format file size
@@ -34,15 +40,15 @@ const FileUploadLimits = ({ isMobile }: { isMobile: boolean }) => (
       <span className={cn(
         "whitespace-nowrap",
         isMobile && "text-xs"
-      )}>📄 Max {LIMITS.MAX_FILES} files</span>
+      )}>📄 Max {DEFAULT_CONFIG.MAX_FILES} files</span>
       <span className={cn(
         "whitespace-nowrap",
         isMobile && "text-xs"
-      )}>📦 {formatFileSize(LIMITS.MAX_FILE_SIZE)}/file</span>
+      )}>📦 {formatFileSize(DEFAULT_CONFIG.MAX_FILE_SIZE)}/file</span>
       <span className={cn(
         "whitespace-nowrap",
         isMobile && "text-xs"
-      )}>💾 {formatFileSize(LIMITS.MAX_TOTAL_SIZE)} total</span>
+      )}>💾 {formatFileSize(DEFAULT_CONFIG.MAX_TOTAL_SIZE)} total</span>
     </div>
   </div>
 );
@@ -70,13 +76,13 @@ const validateFiles = async (files: File[], currentTotalSize = 0, currentFileCou
   let newTotalSize = currentTotalSize;
 
   // Check file count limit
-  if (files.length + currentFileCount > LIMITS.MAX_FILES) {
+  if (files.length + currentFileCount > DEFAULT_CONFIG.MAX_FILES) {
     return {
       valid: false,
       validFiles: [],
       invalidFiles: [],
       error: new Error(
-        `Cannot add more files. Maximum ${LIMITS.MAX_FILES} files allowed ` +
+        `Cannot add more files. Maximum ${DEFAULT_CONFIG.MAX_FILES} files allowed ` +
         `(currently have ${currentFileCount} files)`
       )
     };
@@ -84,14 +90,14 @@ const validateFiles = async (files: File[], currentTotalSize = 0, currentFileCou
 
   // Check total size limit
   const potentialTotalSize = files.reduce((sum, file) => sum + file.size, 0) + currentTotalSize;
-  if (potentialTotalSize > LIMITS.MAX_TOTAL_SIZE) {
+  if (potentialTotalSize > DEFAULT_CONFIG.MAX_TOTAL_SIZE) {
     return {
       valid: false,
       validFiles: [],
       invalidFiles: [],
       error: new Error(
-        `Total size would exceed ${formatFileSize(LIMITS.MAX_TOTAL_SIZE)} limit ` +
-        `(${formatFileSize(potentialTotalSize)} > ${formatFileSize(LIMITS.MAX_TOTAL_SIZE)})`
+        `Total size would exceed ${formatFileSize(DEFAULT_CONFIG.MAX_TOTAL_SIZE)} limit ` +
+        `(${formatFileSize(potentialTotalSize)} > ${formatFileSize(DEFAULT_CONFIG.MAX_TOTAL_SIZE)})`
       )
     };
   }
@@ -107,10 +113,10 @@ const validateFiles = async (files: File[], currentTotalSize = 0, currentFileCou
     }
 
     // Validate file size
-    if (file.size > LIMITS.MAX_FILE_SIZE) {
+    if (file.size > DEFAULT_CONFIG.MAX_FILE_SIZE) {
       invalidFiles.push({ 
         file, 
-        reason: `File size exceeds ${formatFileSize(LIMITS.MAX_FILE_SIZE)} limit ` +
+        reason: `File size exceeds ${formatFileSize(DEFAULT_CONFIG.MAX_FILE_SIZE)} limit ` +
                 `(${formatFileSize(file.size)})` 
       });
       continue;
@@ -160,8 +166,8 @@ const STAGE_WEIGHTS: Record<string, StageWeight> = {
 
 export function FileUpload({
   onFilesSelected,
-  maxFiles = LIMITS.MAX_FILES,
-  acceptedFileTypes = ['application/pdf'],
+  maxFiles = DEFAULT_CONFIG.MAX_FILES,
+  acceptedFileTypes = DEFAULT_CONFIG.ALLOWED_TYPES,
   className = "",
   hideFileList = false,
   onError,

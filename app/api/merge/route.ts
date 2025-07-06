@@ -6,12 +6,12 @@ import { rateLimiters, getRateLimitHeaders } from '@/lib/rate-limit';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 
-// Configure for maximum performance within Vercel hobby plan limits
+// Configure for production performance within Vercel limits
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Set to maximum allowed for Vercel hobby plan (60 seconds)
 
-// Advanced performance metrics
+// Production-optimized performance metrics
 const metrics = {
   startTime: 0,
   bytesProcessed: 0,
@@ -119,9 +119,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Dynamic optimization based on client capabilities and request size
-    const isLowEndDevice = deviceType === 'mobile' || clientMemory < 4096;
-    const isLargeOperation = totalSize > 100 * 1024 * 1024 || fileCount > 20;
+    // Production-optimized dynamic settings
+    const isLowEndDevice = deviceType === 'mobile' || clientMemory < 2048;
+    const isLargeOperation = totalSize > 25 * 1024 * 1024 || fileCount > 10;
     const isHighPriority = priority === 'high';
 
     // Convert files to ArrayBuffer with ultra-optimized streaming
@@ -138,13 +138,13 @@ export async function POST(request: NextRequest) {
         throw new Error(`File ${index + 1} is not a PDF`);
       }
 
-      // Validate file size
-      if (file.size > 50 * 1024 * 1024) {
-        throw new Error(`File ${index + 1} exceeds 50MB limit`);
+      // Validate file size for production
+      if (file.size > 25 * 1024 * 1024) {
+        throw new Error(`File ${index + 1} exceeds 25MB limit`);
       }
       
-      // Enhanced streaming for large files (files larger than 10MB)
-      if (file.size > 10 * 1024 * 1024) {
+      // Enhanced streaming for large files (files larger than 5MB)
+      if (file.size > 5 * 1024 * 1024) {
         const chunks: Uint8Array[] = [];
         let bytesRead = 0;
         
@@ -178,8 +178,8 @@ export async function POST(request: NextRequest) {
       return buffer;
     });
 
-    // Process in optimized dynamic batches - Faster processing
-    const batchSize = isLowEndDevice ? 4 : isHighPriority ? 16 : 8;
+    // Process in production-optimized batches
+    const batchSize = isLowEndDevice ? 2 : isHighPriority ? 8 : 4;
     const buffers: ArrayBuffer[] = [];
     
     for (let i = 0; i < bufferPromises.length; i += batchSize) {
@@ -204,10 +204,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Validate total size
+    // Validate total size for production
     const actualTotalSize = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
-    if (actualTotalSize > 100 * 1024 * 1024) {
-      return NextResponse.json({ error: 'Total file size exceeds 100MB limit' }, { status: 400 });
+    if (actualTotalSize > 50 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Total file size exceeds 50MB limit' }, { status: 400 });
     }
 
     // Add abort support
@@ -227,10 +227,10 @@ export async function POST(request: NextRequest) {
       optimizeOutput: true,
       compressionLevel: isLargeOperation ? 0 : 1,
       preserveMetadata: false,
-      parseSpeed: isLowEndDevice ? 10000 : 40000, // Even faster
-      maxConcurrentOperations: isLowEndDevice ? 32 : isHighPriority ? 1024 : 512, // More concurrency
-      memoryLimit: isLowEndDevice ? 32768 : 131072,
-      chunkSize: isLowEndDevice ? 512 : 2048,
+      parseSpeed: isLowEndDevice ? 5000 : 10000, // Production-optimized
+      maxConcurrentOperations: isLowEndDevice ? 4 : isHighPriority ? 16 : 8, // Production-optimized
+      memoryLimit: isLowEndDevice ? 16384 : 32768, // Production-optimized
+      chunkSize: isLowEndDevice ? 256 : 512, // Production-optimized
       removeAnnotations: false,
       optimizeImages: false,
       abortSignal // Pass abort signal to service
@@ -243,8 +243,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
-    // Ultra-optimized streaming with dynamic chunk sizing
-    const baseChunkSize = isLargeOperation ? 1 * 1024 * 1024 : 4 * 1024 * 1024; // Larger chunks for speed
+    // Production-optimized streaming with dynamic chunk sizing
+    const baseChunkSize = isLargeOperation ? 512 * 1024 : 1 * 1024 * 1024; // Production-optimized chunks
     const chunkSize = isLowEndDevice ? baseChunkSize / 2 : baseChunkSize;
     
     const stream = new ReadableStream({
@@ -264,11 +264,11 @@ export async function POST(request: NextRequest) {
           processedSize += chunk.length;
           const progress = (processedSize / data.length) * 100;
           
-          // Dynamic delay for huge files to prevent memory pressure
+          // Production-optimized delay for large files to prevent memory pressure
           if (isLargeOperation && i > 0) {
-            const delayInterval = isLowEndDevice ? 25 * 1024 * 1024 : 100 * 1024 * 1024;
+            const delayInterval = isLowEndDevice ? 5 * 1024 * 1024 : 10 * 1024 * 1024;
             if (i % delayInterval === 0) {
-              await new Promise(resolve => setTimeout(resolve, isLowEndDevice ? 5 : 1));
+              await new Promise(resolve => setTimeout(resolve, isLowEndDevice ? 10 : 5));
             }
           }
         }

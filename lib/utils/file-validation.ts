@@ -20,9 +20,11 @@ export interface ValidationResult {
   error?: FileValidationError;
 }
 
-export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-export const MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100MB
-export const MAX_FILES = 10;
+// File validation constants (production-optimized)
+export const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB per file (production-optimized)
+export const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total (production-optimized)
+export const MAX_FILES = 20;
+export const ALLOWED_TYPES = ['application/pdf'];
 
 // Keep track of processed files globally
 let processedFiles = new Set<string>();

@@ -4,34 +4,34 @@ import { estimatePDFMemoryUsage } from '@/lib/utils/pdf-validation';
 import { ErrorHandler } from '@/lib/utils/error-handler';
 import pLimit from 'p-limit';
 
-// Optimized limits for maximum performance
+// Optimized limits for production performance
 const LIMITS = {
-  MEMORY: 4096 * 1024 * 1024,    // 4GB memory limit for browser compatibility
-  MAX_FILES: 20,                 // Limit to 20 files as per requirement
-  MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB per file (reduced from 200MB)
-  MAX_TOTAL_SIZE: 100 * 1024 * 1024, // 100MB total (reduced from 200MB)
-  CACHE_SIZE: 512 * 1024 * 1024,  // 512MB cache size for browser memory constraints
-  MAX_CACHE_ENTRIES: 50,         // Reduced cache entries for better memory management
-  SMALL_FILE_THRESHOLD: 10 * 1024 * 1024, // 10MB threshold for small files (reduced from 20MB)
-  LARGE_FILE_THRESHOLD: 25 * 1024 * 1024  // 25MB threshold for large files (reduced from 50MB)
+  MEMORY: 1024 * 1024 * 1024,     // 1GB memory limit for production (reduced from 4GB)
+  MAX_FILES: 20,                  // Limit to 20 files as per requirement
+  MAX_FILE_SIZE: 25 * 1024 * 1024, // 25MB per file (reduced for production)
+  MAX_TOTAL_SIZE: 50 * 1024 * 1024, // 50MB total (reduced for production)
+  CACHE_SIZE: 256 * 1024 * 1024,   // 256MB cache size for production
+  MAX_CACHE_ENTRIES: 25,          // Reduced cache entries for production
+  SMALL_FILE_THRESHOLD: 5 * 1024 * 1024,  // 5MB threshold for small files
+  LARGE_FILE_THRESHOLD: 15 * 1024 * 1024  // 15MB threshold for large files
 };
 
-// Ultra-performance processing constants - Optimized for faster processing
+// Production-optimized processing constants
 const PROCESSING = {
-  CHUNK_SIZE: 25 * 1024 * 1024,      // 25MB chunks for faster processing (reduced from 50MB)
-  PAGE_INTERVAL: 250,                // Faster batch processing (reduced from 500)
-  CLEANUP_INTERVAL: 2000,            // More frequent cleanup (reduced from 3000)
-  MEMORY_THRESHOLD: 0.8,             // Higher memory threshold for speed
-  PARSE_SPEED: 500000,               // Much faster parsing speed (increased from 200000)
-  BATCH_DELAY: 2,                    // Minimal delay for responsiveness (reduced from 5)
-  MAX_CONCURRENT_OPERATIONS: 32,     // More concurrent operations for speed (increased from 16)
-  WORKER_THREADS: 16,                // More worker threads for speed (increased from 8)
-  BATCH_SIZE: 256,                   // Larger batch size for speed (increased from 128)
-  SUB_BATCH_SIZE: 1000,              // Larger sub-batch size for speed (increased from 500)
-  GC_INTERVAL: 10000,                // Less frequent GC for speed (reduced from 15000)
-  STREAM_CHUNK_SIZE: 5 * 1024 * 1024, // 5MB streaming chunks for speed (reduced from 10MB)
-  SMALL_FILE_BATCH_SIZE: 100,        // Larger batch size for small files (increased from 50)
-  LARGE_FILE_BATCH_SIZE: 20          // Larger batch size for large files (increased from 10)
+  CHUNK_SIZE: 10 * 1024 * 1024,       // 10MB chunks for production (reduced from 25MB)
+  PAGE_INTERVAL: 100,                 // Faster batch processing for production
+  CLEANUP_INTERVAL: 1000,             // More frequent cleanup for production
+  MEMORY_THRESHOLD: 0.7,              // Lower memory threshold for production
+  PARSE_SPEED: 100000,                // Optimized parsing speed for production
+  BATCH_DELAY: 1,                     // Minimal delay for production
+  MAX_CONCURRENT_OPERATIONS: 8,       // Reduced concurrency for production stability
+  WORKER_THREADS: 4,                  // Reduced worker threads for production
+  BATCH_SIZE: 64,                     // Smaller batch size for production
+  SUB_BATCH_SIZE: 250,                // Smaller sub-batch size for production
+  GC_INTERVAL: 5000,                  // More frequent GC for production
+  STREAM_CHUNK_SIZE: 2 * 1024 * 1024, // 2MB streaming chunks for production
+  SMALL_FILE_BATCH_SIZE: 50,          // Smaller batch size for small files
+  LARGE_FILE_BATCH_SIZE: 10           // Smaller batch size for large files
 };
 
 interface PDFStats {
