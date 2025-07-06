@@ -10,8 +10,8 @@ import { ProcessingProgress } from '@/lib/services/pdf-service';
 
 // Add these constants at the top level to match the server limits
 const LIMITS = {
-  MAX_TOTAL_SIZE: 200 * 1024 * 1024,  // 200MB total limit
-  MAX_FILE_SIZE: 100 * 1024 * 1024,    // 100MB per file
+  MAX_TOTAL_SIZE: 100 * 1024 * 1024,  // 100MB total limit (reduced from 200MB)
+  MAX_FILE_SIZE: 50 * 1024 * 1024,    // 50MB per file (reduced from 100MB)
   MAX_FILES: 20                        // Max 20 files
 };
 
@@ -194,8 +194,8 @@ export function FileUpload({
   const updateStageProgress = useCallback((stageName: string, progress: number) => {
     setStageProgress(prev => {
       const newStageProgress = {
-        ...prev,
-        [stageName]: progress
+      ...prev,
+      [stageName]: progress
       };
       // Also update the ref to avoid dependency issues
       stageProgressRef.current = newStageProgress;
@@ -343,8 +343,8 @@ export function FileUpload({
     // Update stage progress
     setStageProgress(prev => {
       const newStageProgress = {
-        ...prev,
-        [stage]: adjustedProgress
+      ...prev,
+      [stage]: adjustedProgress
       };
       // Also update the ref to avoid dependency issues
       stageProgressRef.current = newStageProgress;

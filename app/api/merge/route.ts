@@ -4,6 +4,7 @@ import { ErrorHandler } from '@/lib/utils/error-handler';
 import { RequestValidator } from '@/lib/validation/request';
 import { rateLimiters, getRateLimitHeaders } from '@/lib/rate-limit';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 
 // Configure for maximum performance within Vercel hobby plan limits
 export const runtime = 'nodejs';
@@ -35,11 +36,15 @@ export async function POST(request: NextRequest) {
         success: false,
         remaining: 0,
         resetTime: Date.now() + 60000,
-        limit: 10
+        limit: 30
       });
       
       return NextResponse.json(
-        { error: 'Rate limit exceeded. Please try again later.' },
+        { 
+          error: 'Rate limit exceeded. You can merge up to 30 PDFs per minute. Please wait before trying again.',
+          retryAfter: 60,
+          limit: 30
+        },
         { status: 429, headers }
       );
     }
@@ -48,12 +53,42 @@ export async function POST(request: NextRequest) {
     let files: FormDataEntryValue[];
     
     try {
+      // Check if the request has the correct content type
+      const contentType = request.headers.get('content-type');
+      console.log(`[PDF Merge] Request content-type: ${contentType}`);
+      
+      if (!contentType || !contentType.includes('multipart/form-data')) {
+        console.error('Invalid content type:', contentType);
+        return NextResponse.json({ 
+          error: 'Invalid content type. Expected multipart/form-data.' 
+        }, { status: 400 });
+      }
+
       formData = await request.formData();
       files = formData.getAll('files');
+      
+      console.log(`[PDF Merge] Received ${files.length} files from FormData`);
+      
+      // Validate that we actually got files
+      if (!files || files.length === 0) {
+        console.error('[PDF Merge] No files found in FormData');
+        return NextResponse.json({ 
+          error: 'No files found in the request. Please ensure files are properly uploaded.' 
+        }, { status: 400 });
+      }
+      
     } catch (error) {
       console.error('FormData parsing error:', error);
+      
+      // Provide more specific error messages
+      if (error instanceof TypeError && error.message.includes('Failed to parse body as FormData')) {
+        return NextResponse.json({ 
+          error: 'Invalid request format. The request body is not properly formatted as FormData. Please ensure files are uploaded correctly.' 
+        }, { status: 400 });
+      }
+      
       return NextResponse.json({ 
-        error: 'Invalid request format. Please ensure files are properly uploaded.' 
+        error: 'Failed to process uploaded files. Please try again.' 
       }, { status: 400 });
     }
     
@@ -104,12 +139,12 @@ export async function POST(request: NextRequest) {
       }
 
       // Validate file size
-      if (file.size > 200 * 1024 * 1024) {
-        throw new Error(`File ${index + 1} exceeds 200MB limit`);
+      if (file.size > 50 * 1024 * 1024) {
+        throw new Error(`File ${index + 1} exceeds 50MB limit`);
       }
       
-      // Enhanced streaming for large files
-      if (file.size > 50 * 1024 * 1024) {
+      // Enhanced streaming for large files (files larger than 10MB)
+      if (file.size > 10 * 1024 * 1024) {
         const chunks: Uint8Array[] = [];
         let bytesRead = 0;
         
@@ -171,31 +206,45 @@ export async function POST(request: NextRequest) {
 
     // Validate total size
     const actualTotalSize = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
-    if (actualTotalSize > 200 * 1024 * 1024) {
-      return NextResponse.json({ error: 'Total file size exceeds 200MB limit' }, { status: 400 });
+    if (actualTotalSize > 100 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Total file size exceeds 100MB limit' }, { status: 400 });
     }
 
-    // Get PDF service instance with ultra-optimized settings for speed
+    // Add abort support
+    const abortSignal = (request as any).signal || undefined;
+    let aborted = false;
+    if (abortSignal) {
+      abortSignal.addEventListener('abort', () => {
+        aborted = true;
+        console.log('[PDF Merge] Request aborted by client');
+      });
+    }
+
+    // When processing PDFs, pass abortSignal and check for abort
     const pdfService = PDFService.getInstance();
     const result = await pdfService.processPDFs(buffers, {
-      parallelProcessing: true, // Always use parallel processing for speed
+      parallelProcessing: true,
       optimizeOutput: true,
-      compressionLevel: isLargeOperation ? 1 : 2, // Lower compression for speed
+      compressionLevel: isLargeOperation ? 0 : 1,
       preserveMetadata: false,
-      parseSpeed: isLowEndDevice ? 2000 : 10000, // Much faster parsing
-      maxConcurrentOperations: isLowEndDevice ? 8 : isHighPriority ? 256 : 128, // More concurrent operations
-      memoryLimit: isLowEndDevice ? 8192 : 32768, // Higher memory limits
-      chunkSize: isLowEndDevice ? 128 : 512, // Larger chunks for speed
+      parseSpeed: isLowEndDevice ? 10000 : 40000, // Even faster
+      maxConcurrentOperations: isLowEndDevice ? 32 : isHighPriority ? 1024 : 512, // More concurrency
+      memoryLimit: isLowEndDevice ? 32768 : 131072,
+      chunkSize: isLowEndDevice ? 512 : 2048,
       removeAnnotations: false,
-      optimizeImages: false // Disable image optimization for speed
+      optimizeImages: false,
+      abortSignal // Pass abort signal to service
     });
-
+    if (aborted) {
+      console.log('[PDF Merge] Aborted during PDF processing, not sending response');
+      return new Response(null, { status: 499 }); // 499 Client Closed Request
+    }
     if (!result.success) {
       return NextResponse.json({ error: result.error }, { status: 400 });
     }
 
     // Ultra-optimized streaming with dynamic chunk sizing
-    const baseChunkSize = isLargeOperation ? 512 * 1024 : 2 * 1024 * 1024;
+    const baseChunkSize = isLargeOperation ? 1 * 1024 * 1024 : 4 * 1024 * 1024; // Larger chunks for speed
     const chunkSize = isLowEndDevice ? baseChunkSize / 2 : baseChunkSize;
     
     const stream = new ReadableStream({
@@ -205,6 +254,10 @@ export async function POST(request: NextRequest) {
         let processedSize = 0;
         
         for (let i = 0; i < data.length; i += chunkSize) {
+          if (aborted) {
+            controller.error('Aborted');
+            return;
+          }
           const chunk = data.slice(i, i + chunkSize);
           controller.enqueue(chunk);
           
@@ -250,6 +303,10 @@ export async function POST(request: NextRequest) {
     response.headers.set('Cache-Control', 'no-store, must-revalidate');
     response.headers.set('Pragma', 'no-cache');
     response.headers.set('Expires', '0');
+    
+    if (aborted) {
+      return new Response(null, { status: 499 });
+    }
     
     return response;
 

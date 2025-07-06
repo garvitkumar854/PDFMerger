@@ -149,11 +149,11 @@ export const rateLimiters = {
     maxRequests: 100,
   }),
 
-  // PDF merge endpoint (more restrictive)
+  // PDF merge endpoint (increased limits for better user experience)
   merge: rateLimit({
     interval: 60 * 1000, // 1 minute
-    uniqueTokenPerInterval: 500,
-    maxRequests: 10,
+    uniqueTokenPerInterval: 1000,
+    maxRequests: 30, // Increased from 10 to 30
   }),
 
   // Contact form (very restrictive)

@@ -8,30 +8,30 @@ import pLimit from 'p-limit';
 const LIMITS = {
   MEMORY: 4096 * 1024 * 1024,    // 4GB memory limit for browser compatibility
   MAX_FILES: 20,                 // Limit to 20 files as per requirement
-  MAX_FILE_SIZE: 200 * 1024 * 1024, // 200MB per file
-  MAX_TOTAL_SIZE: 200 * 1024 * 1024, // 200MB total as per requirement
+  MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB per file (reduced from 200MB)
+  MAX_TOTAL_SIZE: 100 * 1024 * 1024, // 100MB total (reduced from 200MB)
   CACHE_SIZE: 512 * 1024 * 1024,  // 512MB cache size for browser memory constraints
   MAX_CACHE_ENTRIES: 50,         // Reduced cache entries for better memory management
-  SMALL_FILE_THRESHOLD: 20 * 1024 * 1024, // 20MB threshold for small files
-  LARGE_FILE_THRESHOLD: 50 * 1024 * 1024  // 50MB threshold for large files
+  SMALL_FILE_THRESHOLD: 10 * 1024 * 1024, // 10MB threshold for small files (reduced from 20MB)
+  LARGE_FILE_THRESHOLD: 25 * 1024 * 1024  // 25MB threshold for large files (reduced from 50MB)
 };
 
-// Ultra-performance processing constants
+// Ultra-performance processing constants - Optimized for faster processing
 const PROCESSING = {
-  CHUNK_SIZE: 50 * 1024 * 1024,      // 50MB chunks for faster processing
-  PAGE_INTERVAL: 500,                // Faster batch processing
-  CLEANUP_INTERVAL: 3000,            // More frequent cleanup
+  CHUNK_SIZE: 25 * 1024 * 1024,      // 25MB chunks for faster processing (reduced from 50MB)
+  PAGE_INTERVAL: 250,                // Faster batch processing (reduced from 500)
+  CLEANUP_INTERVAL: 2000,            // More frequent cleanup (reduced from 3000)
   MEMORY_THRESHOLD: 0.8,             // Higher memory threshold for speed
-  PARSE_SPEED: 200000,               // Faster parsing speed
-  BATCH_DELAY: 5,                    // Minimal delay for responsiveness
-  MAX_CONCURRENT_OPERATIONS: 16,     // More concurrent operations for speed
-  WORKER_THREADS: 8,                 // More worker threads for speed
-  BATCH_SIZE: 128,                   // Larger batch size for speed
-  SUB_BATCH_SIZE: 500,               // Larger sub-batch size for speed
-  GC_INTERVAL: 15000,                // Less frequent GC for speed
-  STREAM_CHUNK_SIZE: 10 * 1024 * 1024, // 10MB streaming chunks for speed
-  SMALL_FILE_BATCH_SIZE: 50,         // Larger batch size for small files
-  LARGE_FILE_BATCH_SIZE: 10          // Larger batch size for large files
+  PARSE_SPEED: 500000,               // Much faster parsing speed (increased from 200000)
+  BATCH_DELAY: 2,                    // Minimal delay for responsiveness (reduced from 5)
+  MAX_CONCURRENT_OPERATIONS: 32,     // More concurrent operations for speed (increased from 16)
+  WORKER_THREADS: 16,                // More worker threads for speed (increased from 8)
+  BATCH_SIZE: 256,                   // Larger batch size for speed (increased from 128)
+  SUB_BATCH_SIZE: 1000,              // Larger sub-batch size for speed (increased from 500)
+  GC_INTERVAL: 10000,                // Less frequent GC for speed (reduced from 15000)
+  STREAM_CHUNK_SIZE: 5 * 1024 * 1024, // 5MB streaming chunks for speed (reduced from 10MB)
+  SMALL_FILE_BATCH_SIZE: 100,        // Larger batch size for small files (increased from 50)
+  LARGE_FILE_BATCH_SIZE: 20          // Larger batch size for large files (increased from 10)
 };
 
 interface PDFStats {
@@ -79,6 +79,7 @@ interface ProcessingOptions {
   parseSpeed?: number;
   removeAnnotations?: boolean;
   optimizeImages?: boolean;
+  abortSignal?: AbortSignal;
 }
 
 interface StreamingOptions extends ProcessingOptions {
@@ -186,7 +187,7 @@ export class PDFService {
           for (const [_, obj] of entries) {
             if (obj instanceof PDFDict && obj.lookup(PDFName.of('Subtype')) === PDFName.of('Image')) {
               if (options.optimizeImages) {
-                obj.set(PDFName.of('Interpolate'), PDFName.of('true'));
+              obj.set(PDFName.of('Interpolate'), PDFName.of('true'));
               }
             }
           }
@@ -225,13 +226,13 @@ export class PDFService {
 
   private async checkMemoryLimit(): Promise<void> {
     if (typeof process !== 'undefined') {
-      const currentMemory = process.memoryUsage();
-      if (currentMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
-        await this.cleanup();
-        
-        const newMemory = process.memoryUsage();
-        if (newMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
-          throw new Error('Memory limit reached. Please try with fewer pages.');
+    const currentMemory = process.memoryUsage();
+    if (currentMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
+      await this.cleanup();
+      
+      const newMemory = process.memoryUsage();
+      if (newMemory.heapUsed > LIMITS.MEMORY * PROCESSING.MEMORY_THRESHOLD) {
+        throw new Error('Memory limit reached. Please try with fewer pages.');
         }
       }
     }
@@ -242,7 +243,7 @@ export class PDFService {
       // Clear caches
       this.loadingPromises.clear();
       this.pageCache.clear();
-      this.documentCache.clear();
+        this.documentCache.clear();
       
       // Clear WeakMap caches
       validationCache = new WeakMap();
@@ -309,7 +310,7 @@ export class PDFService {
   ) {
     const now = performance.now();
     const timeElapsed = now - this.startTime;
-    
+
     // Throttle progress updates to prevent excessive calls
     if (now - this.lastProgressUpdate < 100) return;
     
@@ -362,6 +363,11 @@ export class PDFService {
       this.resetProgress();
       this.operationCount++;
 
+      // Check for abort signal at the start
+      if (options.abortSignal?.aborted) {
+        throw new Error('Operation was aborted');
+      }
+
       // Calculate totals
       for (const buffer of buffers) {
         totalSize += buffer.byteLength;
@@ -373,6 +379,11 @@ export class PDFService {
       // Validate all files first
       this.updateProgress('validation', 10, 0, buffers.length, onProgress);
       for (let i = 0; i < buffers.length; i++) {
+        // Check for abort signal during validation
+        if (options.abortSignal?.aborted) {
+          throw new Error('Operation was aborted during validation');
+        }
+        
         const stats = await this.validatePDFLimits(buffers[i]);
         totalPages += stats.pageCount;
         this.updateProgress('validation', 10 + (i / buffers.length) * 5, i, buffers.length, onProgress);
@@ -389,13 +400,18 @@ export class PDFService {
       const limit = pLimit(batchSize);
 
       for (let i = 0; i < buffers.length; i++) {
+        // Check for abort signal during processing
+        if (options.abortSignal?.aborted) {
+          throw new Error('Operation was aborted during processing');
+        }
+        
         const buffer = buffers[i];
         this.processedBytes += buffer.byteLength;
         
         try {
           const doc = await PDFDocument.load(buffer, {
-            updateMetadata: false,
-            ignoreEncryption: true,
+                  updateMetadata: false,
+                  ignoreEncryption: true,
             parseSpeed: options.parseSpeed || PROCESSING.PARSE_SPEED
           });
 
@@ -426,10 +442,20 @@ export class PDFService {
         }
       }
 
+      // Check for abort signal before optimization
+      if (options.abortSignal?.aborted) {
+        throw new Error('Operation was aborted before optimization');
+      }
+
       this.updateProgress('optimizing', 85, buffers.length - 1, buffers.length, onProgress);
 
       // Optimize the merged PDF
       await this.optimizePDF(mergedPdf, options);
+
+      // Check for abort signal before finalizing
+      if (options.abortSignal?.aborted) {
+        throw new Error('Operation was aborted before finalizing');
+      }
 
       this.updateProgress('finalizing', 95, buffers.length - 1, buffers.length, onProgress);
 
@@ -538,8 +564,8 @@ export class PDFService {
 
     } catch (error) {
       validationCache.set(buffer, false);
-      return { 
-        isValid: false, 
+      return {
+        isValid: false,
         error: ErrorHandler.getErrorMessage(error)
       };
     }
@@ -549,7 +575,7 @@ export class PDFService {
     try {
       const catalog = doc.context.lookup(doc.context.trailerInfo.Root);
       if (catalog instanceof PDFDict) {
-        const acroForm = catalog.lookup(PDFName.of('AcroForm'));
+      const acroForm = catalog.lookup(PDFName.of('AcroForm'));
         if (acroForm && acroForm instanceof PDFDict) {
           const xfa = acroForm.lookup(PDFName.of('XFA'));
           return xfa !== undefined;

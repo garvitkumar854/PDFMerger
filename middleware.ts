@@ -92,8 +92,8 @@ export async function middleware(request: NextRequest) {
     if (rateLimitResult) {
       const rateLimitHeaders = getRateLimitHeaders(rateLimitResult);
       Object.entries(rateLimitHeaders).forEach(([key, value]) => {
-        response.headers.set(key, value);
-      });
+    response.headers.set(key, value);
+  });
     }
   } catch (error) {
     // Rate limit check failed, but continue with request

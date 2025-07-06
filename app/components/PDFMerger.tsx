@@ -56,8 +56,8 @@ const PDFMerger: React.FC = () => {
         return;
       }
 
-      setFiles(prev => [...prev, ...acceptedFiles]);
-      setError(null);
+    setFiles(prev => [...prev, ...acceptedFiles]);
+    setError(null);
       
       toast({
         title: "Files added",
