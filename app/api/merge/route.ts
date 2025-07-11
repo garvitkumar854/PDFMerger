@@ -240,7 +240,11 @@ export async function POST(request: NextRequest) {
       return new Response(null, { status: 499 }); // 499 Client Closed Request
     }
     if (!result.success) {
-      return NextResponse.json({ error: result.error }, { status: 400 });
+      return NextResponse.json({ error: result.error, warnings: result.warnings }, { status: 400 });
+    }
+    // If for some reason no PDF data is returned, but warnings exist, return JSON with warnings
+    if (!result.data) {
+      return NextResponse.json({ error: 'No PDF data returned', warnings: result.warnings }, { status: 500 });
     }
 
     // Production-optimized streaming with dynamic chunk sizing

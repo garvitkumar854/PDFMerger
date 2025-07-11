@@ -21,14 +21,15 @@ export async function mergePDFs(files: File[]) {
     const performance = window.performance as ExtendedPerformance;
     const memoryLimit = performance?.memory?.jsHeapSizeLimit;
 
+    const headers = new Headers();
+    headers.append('X-Device-Type', 'web');
+    headers.append('X-Client-Memory', String(memoryLimit || 0));
+    headers.append('X-Total-Size', String(files.reduce((acc, file) => acc + file.size, 0)));
+
     const response = await fetch(`${API_URL}/api/merge`, {
       method: 'POST',
       body: formData,
-      headers: {
-        'X-Device-Type': 'web',
-        'X-Client-Memory': String(memoryLimit || 0),
-        'X-Total-Size': String(files.reduce((acc, file) => acc + file.size, 0)),
-      },
+      headers
     });
 
     if (!response.ok) {

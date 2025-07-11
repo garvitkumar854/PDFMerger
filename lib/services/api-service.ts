@@ -14,12 +14,12 @@ export class APIService {
     // Add client metadata
     const totalSize = files.reduce((sum, file) => sum + file.size, 0);
     
-    const headers = new Headers({
-      'X-Device-Type': 'desktop',
-      'X-Client-Memory': '8192',
-      'X-Total-Size': totalSize.toString(),
-      'X-Priority': 'normal'
-    });
+    // Only set custom headers that are not Content-Type
+    const headers = new Headers();
+    headers.append('X-Device-Type', 'desktop');
+    headers.append('X-Client-Memory', '8192');
+    headers.append('X-Total-Size', totalSize.toString());
+    headers.append('X-Priority', 'normal');
 
     return fetch(`${API_URL}/api/merge`, {
       method: 'POST',

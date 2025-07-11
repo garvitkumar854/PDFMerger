@@ -5,33 +5,35 @@ import { ErrorHandler } from '@/lib/utils/error-handler';
 import pLimit from 'p-limit';
 
 // Optimized limits for production performance
+const isProduction = process.env.NODE_ENV === 'production';
+
 const LIMITS = {
-  MEMORY: 1024 * 1024 * 1024,     // 1GB memory limit for production (reduced from 4GB)
+  MEMORY: isProduction ? 1024 * 1024 * 1024 : 4 * 1024 * 1024 * 1024,     // 1GB prod, 4GB dev
   MAX_FILES: 20,                  // Limit to 20 files as per requirement
-  MAX_FILE_SIZE: 25 * 1024 * 1024, // 25MB per file (reduced for production)
-  MAX_TOTAL_SIZE: 50 * 1024 * 1024, // 50MB total (reduced for production)
-  CACHE_SIZE: 256 * 1024 * 1024,   // 256MB cache size for production
-  MAX_CACHE_ENTRIES: 25,          // Reduced cache entries for production
+  MAX_FILE_SIZE: isProduction ? 25 * 1024 * 1024 : 200 * 1024 * 1024, // 25MB prod, 200MB dev
+  MAX_TOTAL_SIZE: isProduction ? 50 * 1024 * 1024 : 200 * 1024 * 1024, // 50MB prod, 200MB dev
+  CACHE_SIZE: isProduction ? 256 * 1024 * 1024 : 512 * 1024 * 1024,   // 256MB prod, 512MB dev
+  MAX_CACHE_ENTRIES: isProduction ? 25 : 50,          // 25 prod, 50 dev
   SMALL_FILE_THRESHOLD: 5 * 1024 * 1024,  // 5MB threshold for small files
   LARGE_FILE_THRESHOLD: 15 * 1024 * 1024  // 15MB threshold for large files
 };
 
 // Production-optimized processing constants
 const PROCESSING = {
-  CHUNK_SIZE: 10 * 1024 * 1024,       // 10MB chunks for production (reduced from 25MB)
+  CHUNK_SIZE: isProduction ? 10 * 1024 * 1024 : 25 * 1024 * 1024,       // 10MB prod, 25MB dev
   PAGE_INTERVAL: 100,                 // Faster batch processing for production
   CLEANUP_INTERVAL: 1000,             // More frequent cleanup for production
-  MEMORY_THRESHOLD: 0.7,              // Lower memory threshold for production
-  PARSE_SPEED: 100000,                // Optimized parsing speed for production
+  MEMORY_THRESHOLD: isProduction ? 0.7 : 0.85,              // Lower memory threshold for production
+  PARSE_SPEED: isProduction ? 100000 : 500000,                // Optimized parsing speed for production
   BATCH_DELAY: 1,                     // Minimal delay for production
-  MAX_CONCURRENT_OPERATIONS: 8,       // Reduced concurrency for production stability
-  WORKER_THREADS: 4,                  // Reduced worker threads for production
-  BATCH_SIZE: 64,                     // Smaller batch size for production
-  SUB_BATCH_SIZE: 250,                // Smaller sub-batch size for production
+  MAX_CONCURRENT_OPERATIONS: isProduction ? 12 : 32,       // 12 prod, 32 dev
+  WORKER_THREADS: isProduction ? 6 : 16,                  // 6 prod, 16 dev
+  BATCH_SIZE: isProduction ? 64 : 256,                     // 64 prod, 256 dev
+  SUB_BATCH_SIZE: isProduction ? 250 : 1000,                // 250 prod, 1000 dev
   GC_INTERVAL: 5000,                  // More frequent GC for production
-  STREAM_CHUNK_SIZE: 2 * 1024 * 1024, // 2MB streaming chunks for production
-  SMALL_FILE_BATCH_SIZE: 50,          // Smaller batch size for small files
-  LARGE_FILE_BATCH_SIZE: 10           // Smaller batch size for large files
+  STREAM_CHUNK_SIZE: isProduction ? 2 * 1024 * 1024 : 8 * 1024 * 1024, // 2MB prod, 8MB dev
+  SMALL_FILE_BATCH_SIZE: isProduction ? 50 : 200,          // 50 prod, 200 dev
+  LARGE_FILE_BATCH_SIZE: isProduction ? 10 : 40           // 10 prod, 40 dev
 };
 
 interface PDFStats {
@@ -52,6 +54,7 @@ interface MergeResult {
     memoryUsed: number;
     compressionRatio: number;
   };
+  warnings?: string[];
 }
 
 // Cache for PDF validation and metadata
@@ -358,6 +361,7 @@ export class PDFService {
     let mergedPdf: PDFDocument | null = null;
     let totalSize = 0;
     let totalPages = 0;
+    const warnings: string[] = [];
 
     try {
       this.resetProgress();
@@ -383,10 +387,14 @@ export class PDFService {
         if (options.abortSignal?.aborted) {
           throw new Error('Operation was aborted during validation');
         }
-        
-        const stats = await this.validatePDFLimits(buffers[i]);
-        totalPages += stats.pageCount;
-        this.updateProgress('validation', 10 + (i / buffers.length) * 5, i, buffers.length, onProgress);
+        try {
+          const stats = await this.validatePDFLimits(buffers[i]);
+          totalPages += stats.pageCount;
+          this.updateProgress('validation', 10 + (i / buffers.length) * 5, i, buffers.length, onProgress);
+        } catch (err) {
+          warnings.push(`File ${i + 1} skipped: ${ErrorHandler.getErrorMessage(err)}`);
+          continue;
+        }
       }
 
       this.totalPages = totalPages;
@@ -394,8 +402,6 @@ export class PDFService {
 
       // Create merged PDF
       mergedPdf = await PDFDocument.create();
-      
-      // Process files in optimized batches
       const batchSize = options.maxConcurrentOperations || PROCESSING.MAX_CONCURRENT_OPERATIONS;
       const limit = pLimit(batchSize);
 
@@ -404,41 +410,36 @@ export class PDFService {
         if (options.abortSignal?.aborted) {
           throw new Error('Operation was aborted during processing');
         }
-        
         const buffer = buffers[i];
         this.processedBytes += buffer.byteLength;
-        
         try {
           const doc = await PDFDocument.load(buffer, {
-                  updateMetadata: false,
-                  ignoreEncryption: true,
+            updateMetadata: false,
+            ignoreEncryption: true,
             parseSpeed: options.parseSpeed || PROCESSING.PARSE_SPEED
           });
-
           const pageIndices = doc.getPageIndices();
-          const copiedPages = await mergedPdf.copyPages(doc, pageIndices);
-          
+          let copiedPages: PDFPage[] = [];
+          try {
+            copiedPages = await mergedPdf.copyPages(doc, pageIndices);
+          } catch (err) {
+            warnings.push(`File ${i + 1} pages skipped: ${ErrorHandler.getErrorMessage(err)}`);
+            continue;
+          }
           for (const page of copiedPages) {
             mergedPdf.addPage(page);
             this.processedPages++;
           }
-
           // Update progress
           const progress = 20 + (i / buffers.length) * 60;
           this.updateProgress('merging', progress, i, buffers.length, onProgress);
-
           // Memory management
           if (i % 5 === 0) {
             await this.checkMemoryLimit();
           }
-
-        } catch (error) {
-          ErrorHandler.handle(error, { 
-            component: 'PDFService', 
-            action: 'processPDFs',
-            userId: `file_${i}`
-          });
-          throw new Error(`Failed to process file ${i + 1}: ${ErrorHandler.getErrorMessage(error)}`);
+        } catch (err) {
+          warnings.push(`File ${i + 1} skipped: ${ErrorHandler.getErrorMessage(err)}`);
+          continue;
         }
       }
 
@@ -448,32 +449,21 @@ export class PDFService {
       }
 
       this.updateProgress('optimizing', 85, buffers.length - 1, buffers.length, onProgress);
-
-      // Optimize the merged PDF
       await this.optimizePDF(mergedPdf, options);
-
-      // Check for abort signal before finalizing
       if (options.abortSignal?.aborted) {
         throw new Error('Operation was aborted before finalizing');
       }
-
       this.updateProgress('finalizing', 95, buffers.length - 1, buffers.length, onProgress);
-
-      // Save the merged PDF
       const saveOptions: any = {};
       if (options.compressionLevel) {
         saveOptions.useObjectStreams = true;
         saveOptions.addDefaultPage = false;
       }
-
       const mergedPdfBytes = await mergedPdf.save(saveOptions);
-      
       this.updateProgress('complete', 100, buffers.length - 1, buffers.length, onProgress);
-
       const processingTime = performance.now() - startTime;
       const compressionRatio = mergedPdfBytes.length / totalSize;
       const memoryUsed = typeof process !== 'undefined' ? process.memoryUsage().heapUsed / 1024 / 1024 : 0;
-
       return {
         success: true,
         data: mergedPdfBytes,
@@ -483,23 +473,21 @@ export class PDFService {
           processingTime,
           memoryUsed,
           compressionRatio
-        }
+        },
+        warnings: warnings.length > 0 ? warnings : undefined
       };
-
     } catch (error) {
       const errorDetails = ErrorHandler.handle(error, { 
         component: 'PDFService', 
         action: 'processPDFs' 
       });
-      
       return {
         success: false,
-        error: ErrorHandler.createUserMessage(error)
+        error: ErrorHandler.createUserMessage(error),
+        warnings: warnings.length > 0 ? warnings : undefined
       };
     } finally {
       this.operationCount--;
-      
-      // Cleanup if no operations are running
       if (this.operationCount === 0) {
         setTimeout(() => this.cleanup(), 5000);
       }
